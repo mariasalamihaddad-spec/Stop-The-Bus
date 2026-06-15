@@ -233,6 +233,31 @@ function loadRoom(id) {
     return val;
   });
 }
+// Atomic whole-room mutation via a Firebase transaction. mutate(r) edits the
+// room in place (or returns a replacement); returning undefined aborts. This
+// replaces blind saveRoom()/set() writes so two clients editing the same room
+// (joins, chat, scoring, stopping) can't clobber each other's changes.
+function txRoom(id, mutate, cb){
+  if(!_db){
+    var rc=_roomCache[id];
+    if(rc){var res0=mutate(rc); if(res0!==undefined)rc=res0; _roomCache[id]=rc;}
+    if(cb)cb(null,!!rc,rc||null);
+    return;
+  }
+  _db.ref('rooms/'+id).transaction(function(cur){
+    if(cur===null)return; // room gone (or cache cold) — abort, never recreate
+    var res=mutate(cur);
+    return res===undefined?cur:res;
+  }, function(err,committed,snap){
+    var val=snap?snap.val():null;
+    if(val)_roomCache[id]=val;
+    if(cb)cb(err,committed,val);
+  }, false);
+}
+// Build this player's cleaned answer map (only 3+ char answers count for points)
+function buildCleanAnswers(cats){
+  var o={};(cats||[]).forEach(function(k){o[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});return o;
+}
 
 // ── REALTIME LISTENER
 // One persistent Firebase .on() per room. addBC/unbind just swap the callback.
@@ -388,7 +413,7 @@ function renderLobby(){
   if(isHost){
     var bundleButtons=Object.keys(BUNDLES).map(function(k){var v=BUNDLES[k];return '<button class="btn btn-secondary lb-bundle btn-full" data-k="'+k+'" style="justify-content:flex-start;border-color:'+(lobbyBundle===k?'var(--accent)':'var(--border)')+';color:'+(lobbyBundle===k?'var(--accent)':'var(--text2)')+'">'+(lobbyBundle===k?'●':'○')+' '+v.name+'</button>';}).join('')+'<button class="btn btn-secondary lb-bundle btn-full" data-k="custom" style="justify-content:flex-start;border-color:'+(lobbyBundle==='custom'?'var(--accent)':'var(--border)')+';color:'+(lobbyBundle==='custom'?'var(--accent)':'var(--text2)')+'">'+(lobbyBundle==='custom'?'●':'○')+' ✏️ Custom Categories</button>';
     var cats=lobbyBundle==='custom'?lobbyCustom.split('\n').filter(function(s){return s.trim();}).map(function(c){return c.trim();}):BUNDLES[lobbyBundle].cats;
-    var catTags=cats.map(function(c){return '<span class="badge" style="background:var(--cat-tag-bg);color:var(--cat-tag-text)">'+c+'</span>';}).join('');
+    var catTags=cats.map(function(c){return '<span class="badge" style="background:var(--cat-tag-bg);color:var(--cat-tag-text)">'+escapeHtml(c)+'</span>';}).join('');
     var validationOpts=[{k:'vote',label:'🗳️ Everyone Votes',desc:'All players accept/reject answers'},{k:'host',label:'👑 Host Decides',desc:'Only the host approves answers'},{k:'auto',label:'🤖 Auto Checker',desc:'Dictionary validates words'}];
     var validationHTML=validationOpts.map(function(o){return '<button class="btn btn-secondary lb-validation btn-full" data-k="'+o.k+'" style="justify-content:flex-start;flex-direction:column;align-items:flex-start;gap:2px;border-color:'+(lobbyValidation===o.k?'var(--accent)':'var(--border)')+';color:'+(lobbyValidation===o.k?'var(--accent)':'var(--text2)')+'"><span>'+(lobbyValidation===o.k?'●':'○')+' '+o.label+'</span><span style="font-size:10px;font-weight:400;text-transform:none;letter-spacing:0;opacity:.8">'+o.desc+'</span></button>';}).join('');
     var innerSettings=showSettings?'<div class="col gap3"><div><label style="font-size:13px;color:var(--text2);display:block;margin-bottom:6px">Rounds: <strong id="rv">'+lobbyRounds+'</strong></label><input type="range" min="1" max="10" value="'+lobbyRounds+'" id="rr" style="width:100%"></div><div><label style="font-size:13px;color:var(--text2);display:block;margin-bottom:6px">Timer: <strong id="tv">'+lobbyTimer+'s</strong></label><input type="range" min="30" max="180" step="10" value="'+lobbyTimer+'" id="tr" style="width:100%"></div><div><label style="font-size:13px;color:var(--text2);display:block;margin-bottom:6px">Validation Mode</label><div class="col gap2">'+validationHTML+'</div></div><div><label style="font-size:13px;color:var(--text2);display:block;margin-bottom:6px">Categories</label><div class="col gap2">'+bundleButtons+'</div></div>'+(lobbyBundle==='custom'?'<textarea class="inp" id="cc" rows="6" placeholder="One category per line:\nAnimal\nCountry\n(max 10)" style="resize:vertical;font-size:13px">'+lobbyCustom+'</textarea>':'')+'<div style="display:flex;flex-wrap:wrap;gap:6px">'+catTags+'</div></div>':'';
@@ -442,13 +467,13 @@ function renderRoundStart(){
 var gAnswers={},gEnded=false,gStopAnim=false,gStopperName='';
 function renderGame(){
   var r=S.room,cats=r.settings.categories,letter=S.letter;
-  var allFilled=cats.every(function(c){return (gAnswers[c]||'').trim().length>0;});
-  var filled=cats.filter(function(c){return (gAnswers[c]||'').trim();}).length;
+  var allFilled=cats.every(function(c){return (gAnswers[c]||'').trim().length>=3;});
+  var filled=cats.filter(function(c){return (gAnswers[c]||'').trim().length>=3;}).length;
   if(gStopAnim){
     document.getElementById('app').innerHTML='<div class="screen tc"><div class="pa col gap4 center"><div style="font-size:clamp(60px,15vw,100px);animation:busin .8s cubic-bezier(.175,.885,.32,1.275)">🚌</div><h1 style="font-size:clamp(28px,7vw,52px);font-weight:900;color:var(--red);letter-spacing:1px">STOP THE BUS!</h1><p style="color:var(--text2);font-size:18px"><strong style="color:var(--accent)">'+escapeHtml(gStopperName)+'</strong> stopped the bus!</p></div></div>';
     setTimeout(function(){gStopAnim=false;renderGame();bindGame();},2500);return;
   }
-  var inputsHTML=cats.map(function(cat){var val=gAnswers[cat]||'';var done=val.trim().length>0;return '<div class="grow'+(done?' done':'')+'"><div class="clabel">'+cat+'</div><input class="ginp game-inp" data-cat="'+cat+'" placeholder="'+letter+'..." value="'+val+'" maxlength="30" '+(gEnded?'disabled':'')+' autocomplete="off" autocorrect="off" spellcheck="false"><span style="font-size:16px">'+(done?'✅':'⬜')+'</span></div>';}).join('');
+  var inputsHTML=cats.map(function(cat){var val=gAnswers[cat]||'';var done=val.trim().length>0;return '<div class="grow'+(done?' done':'')+'"><div class="clabel">'+escapeHtml(cat)+'</div><input class="ginp game-inp" data-cat="'+escapeHtml(cat)+'" placeholder="'+letter+'..." value="'+val+'" maxlength="30" '+(gEnded?'disabled':'')+' autocomplete="off" autocorrect="off" spellcheck="false"><span style="font-size:16px">'+(done?'✅':'⬜')+'</span></div>';}).join('');
   var timerSec=r.settings.timerSec;
   var isHost=r.hostId===S.player.id;
   var endGameBtn=isHost?'<button class="btn btn-danger btn-sm" id="end-game-btn" title="End game and show overall scores">🏁 End Game</button>':'';
@@ -484,45 +509,52 @@ function startGameTimer(){
   },function(){
     if(!gEnded){
       gEnded=true;
-      var r=getRoom(S.roomId)||S.room;
-      r=autoSubmitAnswers(r);
-      if(!r.roundStopped){r.roundStopped=true;r.stoppedBy='Timer';}
-      r.chat=[...(r.chat||[]),{sys:true,t:'⏰ Time\'s up! Answers saved.'}];
-      saveRoom(S.roomId,r);
-      unbind();vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
-      setState({room:r,screen:'voting'});
+      var playerId=S.player.id;
+      // Transaction so every client adds only its OWN answers — concurrent
+      // timeouts merge instead of clobbering each other's submissions.
+      txRoom(S.roomId,function(r){
+        if(!r.submittedAnswers)r.submittedAnswers={};
+        r.submittedAnswers[playerId]=buildCleanAnswers((r.settings||{}).categories);
+        if(!r.submittedPlayers)r.submittedPlayers=[];
+        if(r.submittedPlayers.indexOf(playerId)<0)r.submittedPlayers.push(playerId);
+        if(!r.roundStopped){
+          r.roundStopped=true;r.stoppedBy='Timer';
+          r.chat=(r.chat||[]).slice(-99).concat([{sys:true,t:'⏰ Time\'s up! Answers saved.'}]);
+        }
+        return r;
+      },function(err,committed,val){
+        unbind();vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
+        setState({room:val||getRoom(S.roomId)||S.room,screen:'voting'});
+      });
     }
   });
   unbind();
   addBC(function(r2){
     if(!r2)r2=getRoom(S.roomId);if(!r2)return;S.room=r2;
     if(r2.gameEnded){unbind();stopTimer();setState({screen:'final',finalScores:r2.scores||{}});return;}
+    if(r2.currentLetter&&r2.currentLetter!==S.letter&&!r2.roundStopped&&!gEnded){stopTimer();gAnswers={};gEnded=false;gStopAnim=false;setState({room:r2,letter:r2.currentLetter,screen:'roundstart'});return;}
     if(r2.roundStopped&&!gEnded){
       gEnded=true;stopTimer();
-      r2=autoSubmitAnswers(r2);
-      saveRoom(S.roomId,r2);
+      var myId=S.player.id;
+      // Someone else stopped the bus — record MY answers into my own slot only
+      // (transaction merges; never overwrites the stopper's or others' answers).
+      txRoom(S.roomId,function(r){
+        if(!r.submittedAnswers)r.submittedAnswers={};
+        if(!r.submittedAnswers[myId])r.submittedAnswers[myId]=buildCleanAnswers((r.settings||{}).categories);
+        if(!r.submittedPlayers)r.submittedPlayers=[];
+        if(r.submittedPlayers.indexOf(myId)<0)r.submittedPlayers.push(myId);
+        return r;
+      });
       gStopperName=r2.stoppedBy||'Someone';gStopAnim=true;
       setTimeout(function(){
         gStopAnim=false;unbind();
         vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
-        setState({room:r2,screen:'voting'});
+        setState({room:getRoom(S.roomId)||r2,screen:'voting'});
       },2500);
       renderGame();return;
     }
     var ce=document.getElementById('game-chat');if(ce){ce.innerHTML=chatH(r2.chat||[]);ce.scrollTop=ce.scrollHeight;}
   });
-}
-function autoSubmitAnswers(r){
-  var cleanAnswers={};
-  // Use r.settings (the live room) not S.room.settings (may be stale)
-  ((r.settings||S.room.settings).categories||[]).forEach(function(k){
-    cleanAnswers[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';
-  });
-  if(!r.submittedAnswers)r.submittedAnswers={};
-  r.submittedAnswers[S.player.id]=cleanAnswers;
-  if(!r.submittedPlayers)r.submittedPlayers=[];
-  if(!r.submittedPlayers.includes(S.player.id))r.submittedPlayers.push(S.player.id);
-  return r;
 }
 function doStop(){
   if(gEnded)return;
@@ -563,19 +595,8 @@ function doStop(){
     renderGame();
   });
 }
-function submitAnswers(){
-  var r=getRoom(S.roomId);if(!r)return;
-  if(!r.submittedAnswers)r.submittedAnswers={};
-  r.submittedAnswers[S.player.id]=gAnswers;
-  if(!r.submittedPlayers)r.submittedPlayers=[];
-  if(!r.submittedPlayers.includes(S.player.id))r.submittedPlayers.push(S.player.id);
-  r.chat=[...(r.chat||[]),{sys:true,t:S.player.name+' submitted answers'}];
-  saveRoom(S.roomId,r);unbind();
-  vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;setState({room:r,screen:'voting'});
-}
-
 // ── VOTING
-var vVotes={},vPhase='vote',vScores={},vAutoChecked=false,vAutoChecking=false;
+var vVotes={},vPhase='vote',vScores={},vAutoChecked=false,vAutoChecking=false,vRoundDelta={};
 function renderVoting(){
   var r2=getRoom(S.roomId)||S.room,r=S.room,p=S.player;
   var cats=r.settings.categories,players=r2.players||[],allAns=r2.submittedAnswers||{};
@@ -594,7 +615,7 @@ function renderVoting(){
     var sorted=[...players].sort(function(a,b){return (vScores[b.id]||0)-(vScores[a.id]||0);});
     var rankE=['🥇','🥈','🥉'];
     var isLast=(r2.currentRound||0)>=(r2.totalRounds||3);
-    document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw fa col gap3" style="width:100%"><div class="tc"><div style="font-size:48px">🏆</div><h1 style="font-size:32px;font-weight:900;color:var(--accent)">'+(isLast?'Final Scores!':'Round Scores!')+'</h1><p style="color:var(--text2)">Round '+(r2.currentRound||0)+' of '+(r2.totalRounds||3)+'</p></div><div class="col gap2">'+sorted.map(function(pl,i){return '<div class="lbrow" style="'+(pl.id===p.id?'background:var(--bg3);border-color:var(--accent4)':'')+'"><div style="font-size:22px;font-weight:900;width:30px;text-align:center">'+(rankE[i]||'#'+(i+1))+'</div>'+avEl(pl.avatar,pl.color)+'<div style="flex:1"><div style="font-weight:800">'+escapeHtml(pl.name)+(pl.id===p.id?' (You)':'')+'</div><div style="font-size:12px;color:var(--text2)">Total</div></div><div style="font-size:28px;font-weight:900;color:var(--accent)">'+(vScores[pl.id]||0)+'</div></div>';}).join('')+'</div>'+(isHost?'<button class="btn btn-primary btn-big btn-full" id="next-round-btn">'+(isLast?'🏁 Final Results':'▶ Next Round')+'</button>':'<div class="tc" style="color:var(--text2);padding:12px">⌛ Waiting for host...</div>')+'</div></div>';
+    document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw fa col gap3" style="width:100%"><div class="tc"><div style="font-size:48px">🏆</div><h1 style="font-size:32px;font-weight:900;color:var(--accent)">'+(isLast?'Final Scores!':'Round Scores!')+'</h1><p style="color:var(--text2)">Round '+(r2.currentRound||0)+' of '+(r2.totalRounds||3)+'</p></div><div class="col gap2">'+sorted.map(function(pl,i){return '<div class="lbrow" style="'+(pl.id===p.id?'background:var(--bg3);border-color:var(--accent4)':'')+'"><div style="font-size:22px;font-weight:900;width:30px;text-align:center">'+(rankE[i]||'#'+(i+1))+'</div>'+avEl(pl.avatar,pl.color)+'<div style="flex:1"><div style="font-weight:800">'+escapeHtml(pl.name)+(pl.id===p.id?' (You)':'')+'</div><div style="font-size:12px;color:var(--green)">+'+((r2.lastRoundDelta||{})[pl.id]||0)+' this round</div></div><div style="font-size:28px;font-weight:900;color:var(--accent)">'+(vScores[pl.id]||0)+'</div></div>';}).join('')+'</div>'+(isHost?'<button class="btn btn-primary btn-big btn-full" id="next-round-btn">'+(isLast?'🏁 Final Results':'▶ Next Round')+'</button>':'<div class="tc" style="color:var(--text2);padding:12px">⌛ Waiting for host...</div>')+'</div></div>';
     var nr=document.getElementById('next-round-btn');if(nr)nr.onclick=goNextRound;
     unbind();addBC(function(r3){
       if(!r3)r3=getRoom(S.roomId);if(!r3)return;S.room=r3;
@@ -634,15 +655,15 @@ function renderVoting(){
   var loadingBanner=(mode==='auto'&&!vAutoChecked)?'<div class="card-sm tc" style="background:var(--bg3);border-color:var(--accent4)"><div style="font-size:20px;margin-bottom:4px">🔍</div><div style="font-weight:700;color:var(--accent4)">Checking words against dictionary...</div></div>':'';
 
   // Table: columns = categories, rows = players
-  var thCells='<th style="position:sticky;left:0;background:var(--card2);padding:8px 12px;text-align:left;font-size:12px;color:var(--text2);z-index:2;min-width:90px">Player</th>'+cats.map(function(cat){return '<th style="padding:8px 12px;text-align:left;font-size:11px;font-weight:800;color:var(--accent4);text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;min-width:120px">'+cat+'</th>';}).join('');
+  var thCells='<th style="position:sticky;left:0;background:var(--card2);padding:8px 12px;text-align:left;font-size:12px;color:var(--text2);z-index:2;min-width:90px">Player</th>'+cats.map(function(cat){return '<th style="padding:8px 12px;text-align:left;font-size:11px;font-weight:800;color:var(--accent4);text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;min-width:120px">'+escapeHtml(cat)+'</th>';}).join('');
   var tbRows=players.map(function(pl){
     var tds=cats.map(function(cat){
-      var ans=(matrix[cat][pl.id]||'').trim(),isDup=ans&&dupMap[cat][pl.id]==='dup',key=cat+'||'+pl.id,v=vVotes[key];
+      var ans=(matrix[cat][pl.id]||'').trim(),isDup=ans&&dupMap[cat][pl.id]==='dup',key=cat+'||'+pl.id,keyAttr=escapeHtml(key),v=vVotes[key];
       var bg=!ans?'var(--bg2)':v==='reject'?'var(--bad-bg)':isDup?'var(--dup-bg)':'var(--ok-bg)';
       var tc=!ans?'var(--text3)':v==='reject'?'var(--bad-text)':isDup?'var(--dup-text)':'var(--ok-text)';
       var voteBtns='';
       if(ans&&canVote(pl.id)){
-        voteBtns='<div style="display:flex;gap:3px;margin-top:4px"><button class="vbtn vok'+(v==='accept'?' on':'')+'" data-key="'+key+'" data-v="accept">✓</button><button class="vbtn vno'+(v==='reject'?' on':'')+'" data-key="'+key+'" data-v="reject">✗</button></div>';
+        voteBtns='<div style="display:flex;gap:3px;margin-top:4px"><button class="vbtn vok'+(v==='accept'?' on':'')+'" data-key="'+keyAttr+'" data-v="accept">✓</button><button class="vbtn vno'+(v==='reject'?' on':'')+'" data-key="'+keyAttr+'" data-v="reject">✗</button></div>';
       } else if(ans&&mode==='auto'&&vAutoChecked){
         voteBtns='<div style="font-size:10px;margin-top:3px;font-weight:700;color:'+(v==='reject'?'var(--red)':'var(--green)')+'">'+(v==='reject'?'✗ Invalid':'✓ Valid')+'</div>';
       }
@@ -681,40 +702,47 @@ function renderVoting(){
   });
 }
 function finalizeVotes(){
-  var r2=getRoom(S.roomId)||S.room,cats=S.room.settings.categories,players=r2.players||[],allAns=r2.submittedAnswers||{};
-  var matrix={};cats.forEach(function(cat){matrix[cat]={};players.forEach(function(pl){matrix[cat][pl.id]=(allAns[pl.id]||{})[cat]||'';});});
-  var dupMap={};cats.forEach(function(cat){
-    var vals=Object.values(matrix[cat]).map(function(v){return v.trim().toLowerCase();}).filter(Boolean);
-    var cnt={};vals.forEach(function(v){cnt[v]=(cnt[v]||0)+1;});
-    dupMap[cat]={};
-    players.forEach(function(pl){var n=(matrix[cat][pl.id]||'').trim().toLowerCase();dupMap[cat][pl.id]=n&&cnt[n]>1?'dup':'ok';});
+  var votes=vVotes; // host's vote map, captured for use inside the transaction
+  txRoom(S.roomId,function(r){
+    var cats=(r.settings&&r.settings.categories)||[],players=r.players||[],allAns=r.submittedAnswers||{};
+    var matrix={};cats.forEach(function(cat){matrix[cat]={};players.forEach(function(pl){matrix[cat][pl.id]=(allAns[pl.id]||{})[cat]||'';});});
+    var dupMap={};cats.forEach(function(cat){
+      var vals=Object.values(matrix[cat]).map(function(v){return v.trim().toLowerCase();}).filter(Boolean);
+      var cnt={};vals.forEach(function(v){cnt[v]=(cnt[v]||0)+1;});
+      dupMap[cat]={};
+      players.forEach(function(pl){var n=(matrix[cat][pl.id]||'').trim().toLowerCase();dupMap[cat][pl.id]=n&&cnt[n]>1?'dup':'ok';});
+    });
+    var add={};players.forEach(function(pl){add[pl.id]=0;});
+    cats.forEach(function(cat){players.forEach(function(pl){
+      var key=cat+'||'+pl.id,ans=(matrix[cat][pl.id]||'').trim();
+      if(!ans||votes[key]==='reject')return;
+      // single player gets full points (no dups possible), multiplayer: dup=5, unique=10
+      add[pl.id]+=players.length===1?10:(dupMap[cat][pl.id]==='dup'?5:10);
+    });});
+    if(!r.scores)r.scores={};
+    players.forEach(function(pl){r.scores[pl.id]=(r.scores[pl.id]||0)+add[pl.id];r.players.forEach(function(rpl){if(rpl.id===pl.id)rpl.score=r.scores[pl.id];});});
+    r.lastRoundDelta=add;
+    r.currentRound=(r.currentRound||0)+1;r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.submittedAnswers={};r.submittedPlayers=[];
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'Scores calculated for round '+r.currentRound}]);
+    return r;
+  },function(err,committed,val){
+    if(err||!val){notify('Could not save scores — try again.','error');return;}
+    vRoundDelta=val.lastRoundDelta||{};vScores=val.scores||{};vPhase='scores';S.room=val;S.finalScores=val.scores||{};renderVoting();
   });
-  var add={};players.forEach(function(pl){add[pl.id]=0;});
-  cats.forEach(function(cat){players.forEach(function(pl){
-    var key=cat+'||'+pl.id,ans=(matrix[cat][pl.id]||'').trim();
-    if(!ans||vVotes[key]==='reject')return;
-    // single player gets full points (no dups possible), multiplayer: dup=5, unique=10
-    add[pl.id]+=players.length===1?10:(dupMap[cat][pl.id]==='dup'?5:10);
-  });});
-  var r=getRoom(S.roomId)||S.room;
-  if(!r.scores)r.scores={};
-  players.forEach(function(pl){r.scores[pl.id]=(r.scores[pl.id]||0)+add[pl.id];r.players.forEach(function(rpl){if(rpl.id===pl.id)rpl.score=r.scores[pl.id];});});
-  r.currentRound=(r.currentRound||0)+1;r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.submittedAnswers={};r.submittedPlayers=[];
-  r.chat=[...(r.chat||[]),{sys:true,t:'Scores calculated for round '+r.currentRound}];
-  saveRoom(S.roomId,r);vScores=r.scores;vPhase='scores';S.room=r;S.finalScores=r.scores;renderVoting();
 }
 function goNextRound(){
-  var r=getRoom(S.roomId)||S.room;if(!r)return;
-  var isLast=(r.currentRound||0)>=(r.totalRounds||3);
+  var r0=getRoom(S.roomId)||S.room;if(!r0)return;
+  var isLast=(r0.currentRound||0)>=(r0.totalRounds||3);
   if(isLast){
-    r.gameEnded=true;saveRoom(S.roomId,r);
-    unbind();stopTimer();setState({screen:'final',finalScores:r.scores||{}});
+    txRoom(S.roomId,function(r){r.gameEnded=true;return r;},function(err,committed,val){
+      unbind();stopTimer();setState({screen:'final',finalScores:(val&&val.scores)||{}});
+    });
   } else {
-    r.currentLetter=null;r.status='playing';r.roundStopped=false;
-    saveRoom(S.roomId,r);
-    vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
-    gAnswers={};gEnded=false;gStopAnim=false;
-    handleGameStart(r);
+    txRoom(S.roomId,function(r){r.currentLetter=null;r.status='playing';r.roundStopped=false;return r;},function(err,committed,val){
+      vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
+      gAnswers={};gEnded=false;gStopAnim=false;
+      if(val)handleGameStart(val);
+    });
   }
 }
 
@@ -745,12 +773,26 @@ function doJoin(){
   loadRoom(c).then(function(r){
     if(!r){notify('Room not found!','error');return;}
     if(r.status!=='lobby'){notify('Game already started!','warn');return;}
-    if(r.players.length>=8){notify('Room is full!','error');return;}
+    if((r.players||[]).length>=8){notify('Room is full!','error');return;}
     var p=S.player;
-    if(!r.players.find(function(x){return x.id===p.id;})){r.players.push({id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0});r.chat=[...(r.chat||[]),{sys:true,t:p.name+' joined the lobby'}];saveRoom(c,r);}
-    showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;
-    try{sessionStorage.setItem('stb_room',c);}catch(e){}
-    homeMode='';joinCode='';setState({roomId:c,room:r,screen:'lobby'});
+    // Add ourselves atomically — guards against two people taking the last slot
+    txRoom(c,function(rr){
+      if(rr.status!=='lobby')return; // abort — started since we looked
+      rr.players=rr.players||[];
+      if(rr.players.length>=8&&!rr.players.find(function(x){return x.id===p.id;}))return; // full — abort
+      if(!rr.players.find(function(x){return x.id===p.id;})){
+        rr.players.push({id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0});
+        rr.chat=(rr.chat||[]).slice(-100).concat([{sys:true,t:p.name+' joined the lobby'}]);
+      }
+      return rr;
+    },function(err,committed,val){
+      if(err||!val){notify('Could not reach Firebase – check your internet','error');return;}
+      if(val.status!=='lobby'){notify('Game already started!','warn');return;}
+      if(!(val.players||[]).find(function(x){return x.id===p.id;})){notify('Room is full!','error');return;}
+      showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;
+      try{sessionStorage.setItem('stb_room',c);}catch(e){}
+      homeMode='';joinCode='';setState({roomId:c,room:val,screen:'lobby'});
+    });
   }).catch(function(e){
     if(e&&e.message==='permission'){notify('Database rules error – check Firebase console','error');}
     else{notify('Could not reach Firebase – check your internet','error');}
@@ -759,22 +801,42 @@ function doJoin(){
 function leaveRoom(){
   unbind();stopTimer();
   var id=S.roomId,p=S.player;
-  if(id){var r=getRoom(id);if(r){r.players=r.players.filter(function(x){return x.id!==p.id;});r.chat=[...(r.chat||[]),{sys:true,t:p.name+' left'}];if(r.hostId===p.id&&r.players.length>0){r.hostId=r.players[0].id;r.chat.push({sys:true,t:r.players[0].name+' is now host'});}if(r.players.length===0)delRoom(id);else saveRoom(id,r);}}
+  if(id){
+    txRoom(id,function(r){
+      r.players=(r.players||[]).filter(function(x){return x.id!==p.id;});
+      r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:p.name+' left'}]);
+      if(r.hostId===p.id&&r.players.length>0){r.hostId=r.players[0].id;r.chat.push({sys:true,t:r.players[0].name+' is now host'});}
+      return r;
+    },function(err,committed,val){
+      if(val&&(val.players||[]).length===0)delRoom(id); // last one out — clean up
+    });
+  }
   try{sessionStorage.removeItem('stb_room');}catch(e){}
   gAnswers={};gEnded=false;vVotes={};vPhase='vote';
   setState({roomId:null,room:null,screen:'home'});homeMode='';
 }
 function kickPlayer(pid){
-  var r=getRoom(S.roomId);if(!r)return;
-  r.players=r.players.filter(function(p){return p.id!==pid;});r.chat=[...(r.chat||[]),{sys:true,t:'A player was removed by the host'}];saveRoom(S.roomId,r);S.room=r;notify('Player kicked','success');renderLobby();
+  txRoom(S.roomId,function(r){
+    r.players=(r.players||[]).filter(function(p){return p.id!==pid;});
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'A player was removed by the host'}]);
+    return r;
+  },function(err,committed,val){
+    if(val){S.room=val;notify('Player kicked','success');renderLobby();}
+  });
 }
 function hostStart(){
-  var r=getRoom(S.roomId);if(!r)return;
+  var r0=getRoom(S.roomId);if(!r0)return;
   var cats;
   if(lobbyBundle==='custom'){cats=lobbyCustom.split('\n').map(function(s){return s.trim();}).filter(Boolean).slice(0,10);if(cats.length<2){notify('Add at least 2 categories','error');return;}}
   else cats=BUNDLES[lobbyBundle].cats;
-  r.settings={rounds:lobbyRounds,timerSec:lobbyTimer,categories:cats,validation:lobbyValidation};r.currentRound=0;r.totalRounds=lobbyRounds;r.scores={};r.status='playing';r.submittedAnswers={};r.submittedPlayers=[];r.chat=[...(r.chat||[]),{sys:true,t:'🚌 Game starting!'}];
-  saveRoom(S.roomId,r);handleGameStart(r);
+  txRoom(S.roomId,function(r){
+    r.settings={rounds:lobbyRounds,timerSec:lobbyTimer,categories:cats,validation:lobbyValidation};
+    r.currentRound=0;r.totalRounds=lobbyRounds;r.scores={};r.status='playing';r.submittedAnswers={};r.submittedPlayers=[];
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'🚌 Game starting!'}]);
+    return r;
+  },function(err,committed,val){
+    if(val)handleGameStart(val);
+  });
 }
 function handleGameStart(r){
   unbind();stopTimer();
@@ -783,11 +845,12 @@ function handleGameStart(r){
     gAnswers={};gEnded=false;gStopAnim=false;vVotes={};vPhase='vote';
     setState({room:live,letter:live.currentLetter,screen:'roundstart'});
   } else if(live.hostId===S.player.id){
-    // Only the host picks the letter
-    live.currentLetter=LETTERS[Math.floor(Math.random()*LETTERS.length)];
-    saveRoom(S.roomId,live);
-    gAnswers={};gEnded=false;gStopAnim=false;vVotes={};vPhase='vote';
-    setState({room:live,letter:live.currentLetter,screen:'roundstart'});
+    // Only the host picks the letter — write just that field atomically
+    var L=LETTERS[Math.floor(Math.random()*LETTERS.length)];
+    txRoom(S.roomId,function(r){r.currentLetter=L;return r;},function(err,committed,val){
+      gAnswers={};gEnded=false;gStopAnim=false;vVotes={};vPhase='vote';
+      setState({room:val||live,letter:L,screen:'roundstart'});
+    });
   } else {
     // Non-host: wait for Firebase to deliver the letter the host just wrote
     document.getElementById('app').innerHTML='<div class="screen tc"><p style="color:var(--text2);font-size:18px">Starting…</p></div>';
@@ -803,22 +866,24 @@ function handleGameStart(r){
     });
   }
 }
+function postChat(text){
+  var msg={name:S.player.name,color:S.player.color,t:clean(text.trim())};
+  // Append atomically so simultaneous messages from different players don't
+  // overwrite each other (the active screen listener re-renders the chat).
+  txRoom(S.roomId,function(r){
+    r.chat=(r.chat||[]).slice(-100).concat([msg]);
+    return r;
+  });
+}
 function sendChat(ctx){
   var inpId={'game':'gchat-inp','vote':'vchat-inp','lobby':'chat-inp'}[ctx]||'chat-inp';
-  var chatId={'game':'game-chat','vote':'vchat','lobby':'lobby-chat'}[ctx]||'lobby-chat';
   var el=document.getElementById(inpId);if(!el||!el.value.trim())return;
-  var r=getRoom(S.roomId);if(!r)return;
-  r.chat=[...(r.chat||[]).slice(-100),{name:S.player.name,color:S.player.color,t:clean(el.value.trim())}];
-  saveRoom(S.roomId,r);S.room=r;el.value='';
-  var ce=document.getElementById(chatId);if(ce){ce.innerHTML=chatH(r.chat);ce.scrollTop=ce.scrollHeight;}
+  postChat(el.value);el.value='';
 }
 function lobbyChat(text){
   if(!text||!text.trim())return;
-  var r=getRoom(S.roomId);if(!r)return;
-  r.chat=[...(r.chat||[]).slice(-100),{name:S.player.name,color:S.player.color,t:clean(text.trim())}];
-  saveRoom(S.roomId,r);S.room=r;
+  postChat(text);
   var el=document.getElementById('chat-inp');if(el)el.value='';
-  var ce=document.getElementById('lobby-chat');if(ce){ce.innerHTML=chatH(r.chat);ce.scrollTop=ce.scrollHeight;}
 }
 // ── CONFIRM MODAL (replaces native confirm() which blocks the JS thread and looks bad on mobile)
 function showConfirmModal(msg, onYes){
@@ -829,23 +894,53 @@ function showConfirmModal(msg, onYes){
   document.getElementById('cm-yes').onclick=function(){div.remove();onYes();};
 }
 
+function showChoiceModal(title,msg,labelA,onA,labelB,onB){
+  var div=document.createElement('div');div.className='modal-bg';
+  div.innerHTML='<div class="modal col gap4"><h2 style="font-size:20px;font-weight:800">'+escapeHtml(title)+'</h2><p style="font-size:15px;line-height:1.5;color:var(--text2)">'+escapeHtml(msg)+'</p><div class="col gap2"><button class="btn btn-secondary btn-full" id="cm-a">'+escapeHtml(labelA)+'</button><button class="btn btn-danger btn-full" id="cm-b">'+escapeHtml(labelB)+'</button><button class="btn btn-full" id="cm-cancel" style="background:transparent;color:var(--text3)">Cancel</button></div></div>';
+  document.body.appendChild(div);
+  document.getElementById('cm-a').onclick=function(){div.remove();onA();};
+  document.getElementById('cm-b').onclick=function(){div.remove();onB();};
+  document.getElementById('cm-cancel').onclick=function(){div.remove();};
+}
+function hostNewLetter(){
+  var nm=S.player.name;
+  txRoom(S.roomId,function(r){
+    r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.submittedAnswers={};r.submittedPlayers=[];
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'\ud83d\udd04 '+nm+' skipped to a new letter \u2014 this round won\'t count'}]);
+    return r;
+  },function(err,committed,val){
+    vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
+    gAnswers={};gEnded=false;gStopAnim=false;stopTimer();
+    if(val)handleGameStart(val);
+  });
+}
+function hostFinishGame(){
+  var nm=S.player.name;
+  txRoom(S.roomId,function(r){
+    r.gameEnded=true;
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'\ud83c\udfc1 '+nm+' (host) ended the game'}]);
+    return r;
+  },function(err,committed,val){
+    unbind();stopTimer();
+    setState({screen:'final',finalScores:(val&&val.scores)||{}});
+  });
+}
 function hostEndGame(){
   var r=getRoom(S.roomId);if(!r)return;
   if(r.hostId!==S.player.id){notify('Only the host can end the game','error');return;}
-  showConfirmModal('End the game now and show final scores to everyone?', function(){
-    r.gameEnded=true;
-    r.chat=[...(r.chat||[]),{sys:true,t:'\U0001f3c1 '+S.player.name+' (host) ended the game'}];
-    saveRoom(S.roomId,r);
-    unbind();stopTimer();
-    setState({screen:'final',finalScores:r.scores||{}});
-  });
+  showChoiceModal('End the round early?','This round\'s answers will NOT be scored. What do you want to do?','\ud83d\udd04 New letter (skip this round)',function(){hostNewLetter();},'\ud83c\udfc1 End the whole game',function(){hostFinishGame();});
 }
 
 function playAgain(){
-  var r=getRoom(S.roomId);if(!r)return;
-  r.status='lobby';r.currentRound=0;r.scores={};r.submittedAnswers={};r.submittedPlayers=[];r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.chat=[...(r.chat||[]),{sys:true,t:'New game! Back to lobby.'}];
-  saveRoom(S.roomId,r);showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;lobbyCustom='';gAnswers={};gEnded=false;vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
-  setState({room:r,screen:'lobby'});
+  txRoom(S.roomId,function(r){
+    r.status='lobby';r.currentRound=0;r.scores={};r.submittedAnswers={};r.submittedPlayers=[];r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.gameEnded=false;
+    r.players=(r.players||[]).map(function(pl){pl.score=0;return pl;});
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'New game! Back to lobby.'}]);
+    return r;
+  },function(err,committed,val){
+    showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;lobbyCustom='';gAnswers={};gEnded=false;vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
+    if(val)setState({room:val,screen:'lobby'});
+  });
 }
 
 // ── RENDER ROUTER
