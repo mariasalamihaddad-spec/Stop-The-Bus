@@ -130,13 +130,13 @@ html[data-theme="light"] .star{opacity:.25!important;animation:none}
 </style>
 </head>
 <body>
-<div id="app" style="min-height:100vh;background:var(--bg);display:flex;align-items:center;justify-content:center">
-  <p style="color:var(--text2);font-size:18px;font-family:sans-serif">Loading…</p>
-</div>
 <button class="theme-toggle" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">🌙</button>
 <div class="stars" id="stars"></div>
 <div id="app"></div>
 <script>
+// ── HELPERS (early, used everywhere)
+function escapeHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
 // ── STARS
 (function(){const s=document.getElementById('stars');for(let i=0;i<55;i++){const d=document.createElement('div');const sz=Math.random()*2+.5;const dur=(2+Math.random()*4).toFixed(1);const delay=(Math.random()*6).toFixed(1);d.className='star';d.style.cssText='left:'+Math.random()*100+'%;top:'+Math.random()*100+'%;width:'+sz+'px;height:'+sz+'px;animation:twinkle '+dur+'s '+delay+'s infinite';s.appendChild(d);}})();
 
@@ -186,28 +186,32 @@ const FIREBASE_CONFIG = {
 
 // ── FIREBASE INIT
 var _db = null;
+var _auth = null;
+var _firebaseUid = null;
 var _roomCache = {};
+
+function _loadScript(src){
+  return new Promise(function(res,rej){var s=document.createElement('script');s.src=src;s.onload=res;s.onerror=rej;document.head.appendChild(s);});
+}
 
 function initFirebase() {
   return new Promise(function(resolve, reject) {
-    if (_db) { resolve(); return; }
-    var s1 = document.createElement('script');
-    s1.src = 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js';
-    s1.onerror = reject;
-    s1.onload = function() {
-      var s2 = document.createElement('script');
-      s2.src = 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js';
-      s2.onerror = reject;
-      s2.onload = function() {
-        try {
-          if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
-          _db = firebase.database();
-          resolve();
-        } catch(e) { reject(e); }
-      };
-      document.head.appendChild(s2);
-    };
-    document.head.appendChild(s1);
+    if (_db && _firebaseUid) { resolve(); return; }
+    _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js')
+    .then(function(){ return _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js'); })
+    .then(function(){ return _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js'); })
+    .then(function(){
+      if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+      _db = firebase.database();
+      _auth = firebase.auth();
+      // Sign in anonymously — gives us a stable, server-verified UID per device
+      return _auth.signInAnonymously();
+    })
+    .then(function(cred){
+      _firebaseUid = cred.user.uid;
+      resolve();
+    })
+    .catch(reject);
   });
 }
 
@@ -232,7 +236,7 @@ function loadRoom(id) {
 
 // ── REALTIME LISTENER
 // One persistent Firebase .on() per room. addBC/unbind just swap the callback.
-var _roomRef = null, _roomRefId = null, _currentCB = null;
+var _roomRef = null, _roomRefId = null, _currentCB = null, _waitLetterRef = null;
 
 function _ensureListener(id) {
   if (_roomRef && _roomRefId === id) return;
@@ -246,7 +250,10 @@ function _ensureListener(id) {
     if (_currentCB) _currentCB(val);
   });
 }
-function unbind() { _currentCB = null; }
+function unbind() {
+  _currentCB = null;
+  if(_waitLetterRef){_waitLetterRef.off('value');_waitLetterRef=null;}
+}
 function addBC(fn) {
   _currentCB = fn;
   if (S.roomId) _ensureListener(S.roomId);
@@ -316,8 +323,8 @@ function timerSVG(left,max){
 }
 function chatH(msgs){
   return (msgs||[]).slice(-50).map(function(m){
-    if(m.sys)return '<div class="chat-sys">'+clean(m.t||'')+'</div>';
-    return '<div class="chat-row"><span style="font-weight:700;color:'+(m.color||'#a78bfa')+'">'+m.name+': </span>'+clean(m.t||'')+'</div>';
+    if(m.sys)return '<div class="chat-sys">'+escapeHtml(clean(m.t||''))+'</div>';
+    return '<div class="chat-row"><span style="font-weight:700;color:'+escapeHtml(m.color||'#a78bfa')+'">'+escapeHtml(m.name)+': </span>'+escapeHtml(clean(m.t||''))+'</div>';
   }).join('');
 }
 function scrollChat(id){var el=document.getElementById(id);if(el)el.scrollTop=el.scrollHeight;}
@@ -343,7 +350,8 @@ function renderWelcome(){
 }
 function goStep2(){if(!wName.trim()||wName.trim().length<2){notify('Name must be at least 2 characters','error');return;}wStep=1;renderWelcome();}
 function finishWelcome(){
-  var p={id:uid(),name:clean(wName.trim()),avatar:AVATARS[wAv],color:COLORS[wCol]};
+  // Use the Firebase-issued UID so identity is server-verified, not just a local random string
+  var p={id:_firebaseUid||uid(),name:clean(wName.trim()),avatar:AVATARS[wAv],color:COLORS[wCol]};
   try{sessionStorage.setItem('stb_p',JSON.stringify(p));}catch(e){}
   S.player=p;S.screen='home';homeMode='';render();
 }
@@ -373,7 +381,7 @@ function renderLobby(){
   if(!r){document.getElementById('app').innerHTML='<div class="screen tc"><p>Loading...</p></div>';return;}
   var isHost=r.hostId===p.id;
   var plHTML=r.players.map(function(pl,i){
-    return '<div class="prow" style="animation:slidein .25s ease both;animation-delay:'+(i*40)+'ms">'+avEl(pl.avatar,pl.color)+'<span style="font-weight:700;flex:1">'+pl.name+'</span>'+(pl.id===r.hostId?'<span class="badge" style="background:var(--host-badge-bg);color:var(--accent)">👑 Host</span>':'')+(pl.id===p.id?'<span class="badge" style="background:var(--you-badge-bg);color:var(--you-badge-text)">You</span>':'')+(isHost&&pl.id!==p.id?'<button class="btn btn-danger btn-sm kick-btn" data-pid="'+pl.id+'">Kick</button>':'')+'</div>';
+    return '<div class="prow" style="animation:slidein .25s ease both;animation-delay:'+(i*40)+'ms">'+avEl(pl.avatar,pl.color)+'<span style="font-weight:700;flex:1">'+escapeHtml(pl.name)+'</span>'+(pl.id===r.hostId?'<span class="badge" style="background:var(--host-badge-bg);color:var(--accent)">👑 Host</span>':'')+(pl.id===p.id?'<span class="badge" style="background:var(--you-badge-bg);color:var(--you-badge-text)">You</span>':'')+(isHost&&pl.id!==p.id?'<button class="btn btn-danger btn-sm kick-btn" data-pid="'+pl.id+'">Kick</button>':'')+'</div>';
   }).join('');
   var waitingHTML=r.players.length<2?'<div class="prow" style="border-style:dashed;color:var(--text3);justify-content:center;font-style:italic;font-size:13px"><span class="pulse-dot">●</span> Waiting for more players to join…</div>':'';
   var settingsHTML='';
@@ -437,14 +445,14 @@ function renderGame(){
   var allFilled=cats.every(function(c){return (gAnswers[c]||'').trim().length>0;});
   var filled=cats.filter(function(c){return (gAnswers[c]||'').trim();}).length;
   if(gStopAnim){
-    document.getElementById('app').innerHTML='<div class="screen tc"><div class="pa col gap4 center"><div style="font-size:clamp(60px,15vw,100px);animation:busin .8s cubic-bezier(.175,.885,.32,1.275)">🚌</div><h1 style="font-size:clamp(28px,7vw,52px);font-weight:900;color:var(--red);letter-spacing:1px">STOP THE BUS!</h1><p style="color:var(--text2);font-size:18px"><strong style="color:var(--accent)">'+gStopperName+'</strong> stopped the bus!</p></div></div>';
+    document.getElementById('app').innerHTML='<div class="screen tc"><div class="pa col gap4 center"><div style="font-size:clamp(60px,15vw,100px);animation:busin .8s cubic-bezier(.175,.885,.32,1.275)">🚌</div><h1 style="font-size:clamp(28px,7vw,52px);font-weight:900;color:var(--red);letter-spacing:1px">STOP THE BUS!</h1><p style="color:var(--text2);font-size:18px"><strong style="color:var(--accent)">'+escapeHtml(gStopperName)+'</strong> stopped the bus!</p></div></div>';
     setTimeout(function(){gStopAnim=false;renderGame();bindGame();},2500);return;
   }
   var inputsHTML=cats.map(function(cat){var val=gAnswers[cat]||'';var done=val.trim().length>0;return '<div class="grow'+(done?' done':'')+'"><div class="clabel">'+cat+'</div><input class="ginp game-inp" data-cat="'+cat+'" placeholder="'+letter+'..." value="'+val+'" maxlength="30" '+(gEnded?'disabled':'')+' autocomplete="off" autocorrect="off" spellcheck="false"><span style="font-size:16px">'+(done?'✅':'⬜')+'</span></div>';}).join('');
   var timerSec=r.settings.timerSec;
   var isHost=r.hostId===S.player.id;
   var endGameBtn=isHost?'<button class="btn btn-danger btn-sm" id="end-game-btn" title="End game and show overall scores">🏁 End Game</button>':'';
-  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center gap3"><div id="timer-wrap" style="flex-shrink:0">'+timerSVG(_tl||timerSec,timerSec)+'</div><div style="flex:1"><div class="row center gap2" style="margin-bottom:4px"><span style="color:var(--text2);font-size:12px">Round '+((r.currentRound||0)+1)+'/'+r.totalRounds+'</span>'+(gEnded?'<span class="badge" style="background:var(--bad-bg);color:var(--bad-text)">Time\'s up!</span>':'')+'</div><div style="height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;border-radius:3px;background:var(--green);width:'+(filled/cats.length*100)+'%;transition:width .3s"></div></div><span style="font-size:12px;color:'+(allFilled?'var(--green)':'var(--text2)')+'">'+(allFilled?'✅ All filled!':filled+'/'+cats.length+' filled')+'</span></div><div class="tc" style="background:var(--bg2);border-radius:var(--r);padding:6px 14px;border:1.5px solid var(--border2);flex-shrink:0"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">Letter</div><div style="font-size:38px;font-weight:900;color:var(--accent);line-height:1.1">'+letter+'</div></div></div>'+(endGameBtn?'<div class="row" style="justify-content:flex-end">'+endGameBtn+'</div>':'')+'<div class="col gap2">'+inputsHTML+'</div>'+(!gEnded?'<button class="stopbtn" id="stop-btn" '+(allFilled?'':'disabled')+'>🚌 STOP THE BUS!</button>':'')''+'<div class="chat-box"><div class="chat-msgs" id="game-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="gchat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="gchat-send">↑</button></div></div></div></div>';
+  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center gap3"><div id="timer-wrap" style="flex-shrink:0">'+timerSVG(_tl||timerSec,timerSec)+'</div><div style="flex:1"><div class="row center gap2" style="margin-bottom:4px"><span style="color:var(--text2);font-size:12px">Round '+((r.currentRound||0)+1)+'/'+r.totalRounds+'</span>'+(gEnded?'<span class="badge" style="background:var(--bad-bg);color:var(--bad-text)">Time\'s up!</span>':'')+'</div><div style="height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;border-radius:3px;background:var(--green);width:'+(filled/cats.length*100)+'%;transition:width .3s"></div></div><span style="font-size:12px;color:'+(allFilled?'var(--green)':'var(--text2)')+'">'+(allFilled?'✅ All filled!':filled+'/'+cats.length+' filled')+'</span></div><div class="tc" style="background:var(--bg2);border-radius:var(--r);padding:6px 14px;border:1.5px solid var(--border2);flex-shrink:0"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">Letter</div><div style="font-size:38px;font-weight:900;color:var(--accent);line-height:1.1">'+letter+'</div></div></div>'+(endGameBtn?'<div class="row" style="justify-content:flex-end">'+endGameBtn+'</div>':'')+'<div class="col gap2">'+inputsHTML+'</div>'+(!gEnded?'<button class="stopbtn" id="stop-btn" '+(allFilled?'':'disabled')+'>🚌 STOP THE BUS!</button>':'')+'<div class="chat-box"><div class="chat-msgs" id="game-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="gchat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="gchat-send">↑</button></div></div></div></div>';
   bindGame();scrollChat('game-chat');
 }
 function bindGame(){
@@ -479,7 +487,7 @@ function startGameTimer(){
       var r=getRoom(S.roomId)||S.room;
       r=autoSubmitAnswers(r);
       if(!r.roundStopped){r.roundStopped=true;r.stoppedBy='Timer';}
-      r.chat=[...(r.chat||[]),{sys:true,t:'⏰ Time's up! Answers saved.'}];
+      r.chat=[...(r.chat||[]),{sys:true,t:'⏰ Time\'s up! Answers saved.'}];
       saveRoom(S.roomId,r);
       unbind();vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
       setState({room:r,screen:'voting'});
@@ -506,7 +514,8 @@ function startGameTimer(){
 }
 function autoSubmitAnswers(r){
   var cleanAnswers={};
-  (S.room.settings.categories||[]).forEach(function(k){
+  // Use r.settings (the live room) not S.room.settings (may be stale)
+  ((r.settings||S.room.settings).categories||[]).forEach(function(k){
     cleanAnswers[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';
   });
   if(!r.submittedAnswers)r.submittedAnswers={};
@@ -519,19 +528,40 @@ function doStop(){
   if(gEnded)return;
   var cats=S.room.settings.categories;
   if(!cats.every(function(c){return (gAnswers[c]||'').trim().length>=3;})){notify('Fill all categories first!','error');return;}
-  gEnded=true;stopTimer();
-  var r=getRoom(S.roomId)||S.room;
-  r=autoSubmitAnswers(r);
-  r.roundStopped=true;r.stoppedBy=S.player.name;
-  r.chat=[...(r.chat||[]),{sys:true,t:'🚌 '+S.player.name+' stopped the bus!'}];
-  saveRoom(S.roomId,r);S.room=r;
-  gStopperName=S.player.name;gStopAnim=true;
-  setTimeout(function(){
-    gStopAnim=false;unbind();
-    vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
-    setState({room:r,screen:'voting'});
-  },2500);
-  renderGame();
+
+  // Build the clean answer map before entering the transaction
+  var cleanAnswers={};
+  cats.forEach(function(k){cleanAnswers[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});
+  var playerId=S.player.id, playerName=S.player.name;
+
+  // Transaction prevents two players stopping simultaneously — only the first write wins
+  _db.ref('rooms/'+S.roomId).transaction(function(r){
+    if(!r||r.roundStopped)return; // already stopped — abort so the other player "wins"
+    if(!r.submittedAnswers)r.submittedAnswers={};
+    r.submittedAnswers[playerId]=cleanAnswers;
+    if(!r.submittedPlayers)r.submittedPlayers=[];
+    if(r.submittedPlayers.indexOf(playerId)<0)r.submittedPlayers.push(playerId);
+    r.roundStopped=true;
+    r.stoppedBy=playerName;
+    r.chat=(r.chat||[]).slice(-99).concat([{sys:true,t:'🚌 '+playerName+' stopped the bus!'}]);
+    return r;
+  }, function(err, committed){
+    if(err){notify('Connection error — try again.','error');return;}
+    gEnded=true;stopTimer();
+    if(!committed){
+      // Someone else stopped first; our answers will be submitted by the roundStopped listener
+      notify('Someone else stopped first!','warn');
+      return;
+    }
+    var r=getRoom(S.roomId)||S.room;S.room=r;
+    gStopperName=playerName;gStopAnim=true;
+    setTimeout(function(){
+      gStopAnim=false;unbind();
+      vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
+      setState({room:r,screen:'voting'});
+    },2500);
+    renderGame();
+  });
 }
 function submitAnswers(){
   var r=getRoom(S.roomId);if(!r)return;
@@ -564,7 +594,7 @@ function renderVoting(){
     var sorted=[...players].sort(function(a,b){return (vScores[b.id]||0)-(vScores[a.id]||0);});
     var rankE=['🥇','🥈','🥉'];
     var isLast=(r2.currentRound||0)>=(r2.totalRounds||3);
-    document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw fa col gap3" style="width:100%"><div class="tc"><div style="font-size:48px">🏆</div><h1 style="font-size:32px;font-weight:900;color:var(--accent)">'+(isLast?'Final Scores!':'Round Scores!')+'</h1><p style="color:var(--text2)">Round '+(r2.currentRound||0)+' of '+(r2.totalRounds||3)+'</p></div><div class="col gap2">'+sorted.map(function(pl,i){return '<div class="lbrow" style="'+(pl.id===p.id?'background:var(--bg3);border-color:var(--accent4)':'')+'"><div style="font-size:22px;font-weight:900;width:30px;text-align:center">'+(rankE[i]||'#'+(i+1))+'</div>'+avEl(pl.avatar,pl.color)+'<div style="flex:1"><div style="font-weight:800">'+pl.name+(pl.id===p.id?' (You)':'')+'</div><div style="font-size:12px;color:var(--text2)">Total</div></div><div style="font-size:28px;font-weight:900;color:var(--accent)">'+(vScores[pl.id]||0)+'</div></div>';}).join('')+'</div>'+(isHost?'<button class="btn btn-primary btn-big btn-full" id="next-round-btn">'+(isLast?'🏁 Final Results':'▶ Next Round')+'</button>':'<div class="tc" style="color:var(--text2);padding:12px">⌛ Waiting for host...</div>')+'</div></div>';
+    document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw fa col gap3" style="width:100%"><div class="tc"><div style="font-size:48px">🏆</div><h1 style="font-size:32px;font-weight:900;color:var(--accent)">'+(isLast?'Final Scores!':'Round Scores!')+'</h1><p style="color:var(--text2)">Round '+(r2.currentRound||0)+' of '+(r2.totalRounds||3)+'</p></div><div class="col gap2">'+sorted.map(function(pl,i){return '<div class="lbrow" style="'+(pl.id===p.id?'background:var(--bg3);border-color:var(--accent4)':'')+'"><div style="font-size:22px;font-weight:900;width:30px;text-align:center">'+(rankE[i]||'#'+(i+1))+'</div>'+avEl(pl.avatar,pl.color)+'<div style="flex:1"><div style="font-weight:800">'+escapeHtml(pl.name)+(pl.id===p.id?' (You)':'')+'</div><div style="font-size:12px;color:var(--text2)">Total</div></div><div style="font-size:28px;font-weight:900;color:var(--accent)">'+(vScores[pl.id]||0)+'</div></div>';}).join('')+'</div>'+(isHost?'<button class="btn btn-primary btn-big btn-full" id="next-round-btn">'+(isLast?'🏁 Final Results':'▶ Next Round')+'</button>':'<div class="tc" style="color:var(--text2);padding:12px">⌛ Waiting for host...</div>')+'</div></div>';
     var nr=document.getElementById('next-round-btn');if(nr)nr.onclick=goNextRound;
     unbind();addBC(function(r3){
       if(!r3)r3=getRoom(S.roomId);if(!r3)return;S.room=r3;
@@ -616,9 +646,9 @@ function renderVoting(){
       } else if(ans&&mode==='auto'&&vAutoChecked){
         voteBtns='<div style="font-size:10px;margin-top:3px;font-weight:700;color:'+(v==='reject'?'var(--red)':'var(--green)')+'">'+(v==='reject'?'✗ Invalid':'✓ Valid')+'</div>';
       }
-      return '<td style="padding:8px 12px;vertical-align:top"><div style="background:'+bg+';color:'+tc+';border-radius:6px;padding:5px 8px;font-size:13px;font-weight:600;min-height:30px">'+(ans||(isDup&&ans?'<span style="font-size:9px;color:var(--orange)">⚠dup</span>':''))+'</div>'+voteBtns+'</td>';
+      return '<td style="padding:8px 12px;vertical-align:top"><div style="background:'+bg+';color:'+tc+';border-radius:6px;padding:5px 8px;font-size:13px;font-weight:600;min-height:30px">'+(ans?escapeHtml(ans):(isDup&&ans?'<span style="font-size:9px;color:var(--orange)">⚠dup</span>':''))+'</div>'+voteBtns+'</td>';
     }).join('');
-    return '<tr style="border-top:1px solid var(--border)"><td style="padding:8px 12px;position:sticky;left:0;background:var(--card);z-index:1;white-space:nowrap">'+avEl(pl.avatar,pl.color)+'<span style="font-weight:700;font-size:13px;margin-left:6px">'+pl.name+(pl.id===p.id?' <span style="font-size:10px;color:var(--you-badge-text)">(you)</span>':'')+'</span></td>'+tds+'</tr>';
+    return '<tr style="border-top:1px solid var(--border)"><td style="padding:8px 12px;position:sticky;left:0;background:var(--card);z-index:1;white-space:nowrap">'+avEl(pl.avatar,pl.color)+'<span style="font-weight:700;font-size:13px;margin-left:6px">'+escapeHtml(pl.name)+(pl.id===p.id?' <span style="font-size:10px;color:var(--you-badge-text)">(you)</span>':'')+'</span></td>'+tds+'</tr>';
   }).join('');
   var cats_html='<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:var(--r);border:1.5px solid var(--border)"><table style="width:100%;border-collapse:collapse;background:var(--card)"><thead><tr style="background:var(--card2)">'+thCells+'</tr></thead><tbody>'+tbRows+'</tbody></table></div>';
 
@@ -695,7 +725,7 @@ function renderFinal(){
   var scores=S.finalScores||r.scores||{};
   var sorted=[...players].sort(function(a,b){return (scores[b.id]||0)-(scores[a.id]||0);});
   var winner=sorted[0],iWin=winner&&winner.id===p.id,rankE=['🥇','🥈','🥉'];
-  document.getElementById('app').innerHTML='<div class="screen"><div class="maxw fa col gap4" style="width:100%"><div class="tc"><div style="font-size:72px;margin-bottom:8px">'+(iWin?'🏆':'🎮')+'</div><h1 style="font-size:clamp(28px,8vw,48px);font-weight:900;color:var(--accent);line-height:1">'+(iWin?'You Won!':'Game Over!')+'</h1><p style="color:var(--text2);margin-top:8px">'+(iWin?'Incredible! 🎉':(winner?winner.name+' wins!':''))+'</p></div><div class="col gap2">'+sorted.map(function(pl,i){return '<div class="lbrow" style="'+(i===0?'border-color:var(--accent);':'')+(pl.id===p.id?'background:var(--bg3);':'')+'"><div style="font-size:22px;font-weight:900;width:30px;text-align:center;color:'+(i===0?'var(--accent)':i===1?'#e2e2e2':i===2?'#cd7f32':'var(--text2)')+'">'+(rankE[i]||'#'+(i+1))+'</div>'+avEl(pl.avatar,pl.color)+'<div style="flex:1"><div style="font-weight:800">'+pl.name+(pl.id===p.id?' (You)':'')+'</div>'+(i===0?'<span class="badge" style="background:var(--host-badge-bg);color:var(--accent)">👑 Winner</span>':'')+'</div><div style="font-size:30px;font-weight:900;color:'+(i===0?'var(--accent)':'var(--text)')+'">'+(scores[pl.id]||0)+'</div></div>';}).join('')+'</div><div class="row gap3"><button class="btn btn-secondary btn-full" id="final-leave">🚪 Leave</button><button class="btn btn-primary btn-full" id="final-again">🔄 Play Again</button></div></div></div>';
+  document.getElementById('app').innerHTML='<div class="screen"><div class="maxw fa col gap4" style="width:100%"><div class="tc"><div style="font-size:72px;margin-bottom:8px">'+(iWin?'🏆':'🎮')+'</div><h1 style="font-size:clamp(28px,8vw,48px);font-weight:900;color:var(--accent);line-height:1">'+(iWin?'You Won!':'Game Over!')+'</h1><p style="color:var(--text2);margin-top:8px">'+(iWin?'Incredible! 🎉':(winner?escapeHtml(winner.name)+' wins!':''))+'</p></div><div class="col gap2">'+sorted.map(function(pl,i){return '<div class="lbrow" style="'+(i===0?'border-color:var(--accent);':'')+(pl.id===p.id?'background:var(--bg3);':'')+'"><div style="font-size:22px;font-weight:900;width:30px;text-align:center;color:'+(i===0?'var(--accent)':i===1?'#e2e2e2':i===2?'#cd7f32':'var(--text2)')+'">'+(rankE[i]||'#'+(i+1))+'</div>'+avEl(pl.avatar,pl.color)+'<div style="flex:1"><div style="font-weight:800">'+escapeHtml(pl.name)+(pl.id===p.id?' (You)':'')+'</div>'+(i===0?'<span class="badge" style="background:var(--host-badge-bg);color:var(--accent)">👑 Winner</span>':'')+'</div><div style="font-size:30px;font-weight:900;color:'+(i===0?'var(--accent)':'var(--text)')+'">'+(scores[pl.id]||0)+'</div></div>';}).join('')+'</div><div class="row gap3"><button class="btn btn-secondary btn-full" id="final-leave">🚪 Leave</button><button class="btn btn-primary btn-full" id="final-again">🔄 Play Again</button></div></div></div>';
   document.getElementById('final-leave').onclick=leaveRoom;
   document.getElementById('final-again').onclick=playAgain;
 }
@@ -761,10 +791,12 @@ function handleGameStart(r){
   } else {
     // Non-host: wait for Firebase to deliver the letter the host just wrote
     document.getElementById('app').innerHTML='<div class="screen tc"><p style="color:var(--text2);font-size:18px">Starting…</p></div>';
-    var waitRef=_db.ref('rooms/'+S.roomId+'/currentLetter');
-    waitRef.on('value',function(snap){
+    // Clean up any previous wait listener before creating a new one
+    if(_waitLetterRef){_waitLetterRef.off('value');_waitLetterRef=null;}
+    _waitLetterRef=_db.ref('rooms/'+S.roomId+'/currentLetter');
+    _waitLetterRef.on('value',function(snap){
       var letter=snap.val(); if(!letter)return;
-      waitRef.off('value');
+      _waitLetterRef.off('value');_waitLetterRef=null;
       var r2=getRoom(S.roomId)||live; r2.currentLetter=letter;
       gAnswers={};gEnded=false;gStopAnim=false;vVotes={};vPhase='vote';
       setState({room:r2,letter:letter,screen:'roundstart'});
@@ -788,16 +820,25 @@ function lobbyChat(text){
   var el=document.getElementById('chat-inp');if(el)el.value='';
   var ce=document.getElementById('lobby-chat');if(ce){ce.innerHTML=chatH(r.chat);ce.scrollTop=ce.scrollHeight;}
 }
+// ── CONFIRM MODAL (replaces native confirm() which blocks the JS thread and looks bad on mobile)
+function showConfirmModal(msg, onYes){
+  var div=document.createElement('div');div.className='modal-bg';
+  div.innerHTML='<div class="modal col gap4"><p style="font-size:16px;font-weight:600;line-height:1.5">'+escapeHtml(msg)+'</p><div class="row gap2"><button class="btn btn-secondary btn-full" id="cm-no">Cancel</button><button class="btn btn-danger btn-full" id="cm-yes">Confirm</button></div></div>';
+  document.body.appendChild(div);
+  document.getElementById('cm-no').onclick=function(){div.remove();};
+  document.getElementById('cm-yes').onclick=function(){div.remove();onYes();};
+}
+
 function hostEndGame(){
   var r=getRoom(S.roomId);if(!r)return;
   if(r.hostId!==S.player.id){notify('Only the host can end the game','error');return;}
-  if(!confirm('End the game now and show final scores to everyone?'))return;
-  // If we're mid-round and have answers, score them first; otherwise just go to final with current scores
-  r.gameEnded=true;
-  r.chat=[...(r.chat||[]),{sys:true,t:'🏁 '+S.player.name+' (host) ended the game'}];
-  saveRoom(S.roomId,r);
-  unbind();stopTimer();
-  setState({screen:'final',finalScores:r.scores||{}});
+  showConfirmModal('End the game now and show final scores to everyone?', function(){
+    r.gameEnded=true;
+    r.chat=[...(r.chat||[]),{sys:true,t:'\U0001f3c1 '+S.player.name+' (host) ended the game'}];
+    saveRoom(S.roomId,r);
+    unbind();stopTimer();
+    setState({screen:'final',finalScores:r.scores||{}});
+  });
 }
 
 function playAgain(){
@@ -827,6 +868,11 @@ function render(){
       var sr=sessionStorage.getItem('stb_room');
       if(sp){
         S.player=JSON.parse(sp);
+        // Migrate old random UID → Firebase UID so security rules work
+        if(_firebaseUid && S.player.id !== _firebaseUid){
+          S.player.id=_firebaseUid;
+          try{sessionStorage.setItem('stb_p',JSON.stringify(S.player));}catch(e){}
+        }
         if(sr){
           loadRoom(sr).then(function(r){
             if(r&&r.players.find(function(x){return x.id===S.player.id;})){
