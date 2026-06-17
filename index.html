@@ -263,8 +263,10 @@ function txRoom(id, mutate, cb){
   }).catch(function(err){ if(cb)cb(err,false,null); });
 }
 // Build this player's cleaned answer map (only 3+ char answers count for points)
+// Keyed by category INDEX (not name) — Firebase keys can't contain "/", "." etc,
+// and several category names like "City / Town" do.
 function buildCleanAnswers(cats){
-  var o={};(cats||[]).forEach(function(k){o[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});return o;
+  var o={};(cats||[]).forEach(function(k,i){o[i]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});return o;
 }
 
 // ── REALTIME LISTENER
@@ -477,6 +479,8 @@ function renderGame(){
   var r=S.room,cats=r.settings.categories,letter=S.letter;
   var skipped=r.skippedCats||[];
   var skipReqs=r.skipReqs||{};
+  // skipReqs is keyed by category index; build a name->request lookup for rendering
+  var skipReqByCat={};Object.keys(skipReqs).forEach(function(k){var rq=skipReqs[k];if(rq&&rq.cat)skipReqByCat[rq.cat]=rq;});
   var activeCats=cats.filter(function(c){return skipped.indexOf(c)<0;});
   // keep the realtime listener in sync so it only re-renders on a real change
   _gameSkipSig=JSON.stringify(skipReqs)+'|'+skipped.join(',');
@@ -490,10 +494,10 @@ function renderGame(){
     if(skipped.indexOf(cat)>=0){
       return '<div class="grow" style="opacity:.55"><div class="clabel">'+escapeHtml(cat)+'</div><span style="flex:1;font-style:italic;color:var(--text3);font-size:13px">Skipped this round</span><span style="font-size:16px">⏭️</span></div>';
     }
-    var val=gAnswers[cat]||'';var done=val.trim().length>0;var hasReq=!!skipReqs[cat];
+    var val=gAnswers[cat]||'';var done=val.trim().length>0;var hasReq=!!skipReqByCat[cat];
     return '<div class="grow'+(done?' done':'')+'"><div class="clabel">'+escapeHtml(cat)+'</div><input class="ginp game-inp" data-cat="'+escapeHtml(cat)+'" placeholder="'+letter+'..." value="'+escapeHtml(val)+'" maxlength="30" '+(gEnded?'disabled':'')+' autocomplete="off" autocorrect="off" spellcheck="false"><button class="btn-skip-req" data-cat="'+escapeHtml(cat)+'" title="Propose skipping this category (needs everyone to agree)" style="background:transparent;border:none;cursor:pointer;font-size:15px;opacity:'+(hasReq?'1':'.45')+'" '+(gEnded?'disabled':'')+'>🙋</button><span style="font-size:16px">'+(done?'✅':'⬜')+'</span></div>';}).join('');
-  var skipBannerHTML=Object.keys(skipReqs).map(function(cat){
-    var req=skipReqs[cat]||{};var agreeCount=Object.keys(req.agree||{}).length;var total=(r.players||[]).length;var iAgreed=req.agree&&req.agree[S.player.id];
+  var skipBannerHTML=Object.keys(skipReqs).map(function(k){
+    var req=skipReqs[k]||{};var cat=req.cat||'';var agreeCount=Object.keys(req.agree||{}).length;var total=(r.players||[]).length;var iAgreed=req.agree&&req.agree[S.player.id];
     return '<div class="card-sm row center between gap2" style="border-color:var(--accent4)"><div style="font-size:13px;flex:1"><strong>🙋 Skip “'+escapeHtml(cat)+'”?</strong><br><span style="color:var(--text2);font-size:11px">by '+escapeHtml(req.by||'')+' · '+agreeCount+'/'+total+' agreed — needs everyone</span></div><div class="row gap2"><button class="btn btn-sm '+(iAgreed?'btn-secondary':'btn-teal')+' skip-agree" data-cat="'+escapeHtml(cat)+'" '+(iAgreed?'disabled':'')+'>'+(iAgreed?'✓ Agreed':'Agree')+'</button><button class="btn btn-sm btn-danger skip-dismiss" data-cat="'+escapeHtml(cat)+'">No</button></div></div>';
   }).join('');
   var timerSec=r.settings.timerSec;
@@ -592,9 +596,9 @@ function doStop(){
     notify('Please fill in all blanks first — or 🙋 request to skip a category.','error');return;
   }
 
-  // Build the clean answer map before entering the transaction
+  // Build the clean answer map before entering the transaction (keyed by index)
   var cleanAnswers={};
-  allCats.forEach(function(k){cleanAnswers[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});
+  allCats.forEach(function(k,i){cleanAnswers[i]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});
   var playerId=S.player.id, playerName=S.player.name;
 
   // Prime the room ref with one read first (same reason as txRoom): a transaction
@@ -634,15 +638,18 @@ function doStop(){
   }).catch(function(){notify('Connection error — try again.','error');});
 }
 // ── SKIP-CATEGORY REQUESTS (propose nullifying a category; needs everyone to agree)
-function finalizeSkipIfUnanimous(r,cat){
-  var req=r.skipReqs&&r.skipReqs[cat];if(!req)return;
+// skipReqs is keyed by category INDEX (Firebase keys can't hold "/", "." etc).
+// Each request stores the readable category name in .cat for display.
+function _catIndex(r,cat){return (r.settings&&r.settings.categories||[]).indexOf(cat);}
+function finalizeSkipIfUnanimous(r,ci){
+  var req=r.skipReqs&&r.skipReqs[ci];if(!req)return;
   var ids=(r.players||[]).map(function(p){return p.id;});
   var allAgree=ids.length>0&&ids.every(function(id){return req.agree&&req.agree[id];});
   if(allAgree){
     if(!r.skippedCats)r.skippedCats=[];
-    if(r.skippedCats.indexOf(cat)<0)r.skippedCats.push(cat);
-    delete r.skipReqs[cat];
-    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'✅ Everyone agreed — “'+cat+'” is skipped this round'}]);
+    if(r.skippedCats.indexOf(req.cat)<0)r.skippedCats.push(req.cat);
+    delete r.skipReqs[ci];
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'✅ Everyone agreed — “'+req.cat+'” is skipped this round'}]);
   }
 }
 function proposeSkip(cat){
@@ -650,31 +657,34 @@ function proposeSkip(cat){
   var nm=S.player.name,myId=S.player.id;
   txRoom(S.roomId,function(r){
     if((r.skippedCats||[]).indexOf(cat)>=0)return; // already skipped
+    var ci=_catIndex(r,cat);if(ci<0)return;
     if(!r.skipReqs)r.skipReqs={};
-    if(!r.skipReqs[cat]){
-      r.skipReqs[cat]={by:nm,agree:{}};
+    if(!r.skipReqs[ci]){
+      r.skipReqs[ci]={by:nm,cat:cat,agree:{}};
       r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'🙋 '+nm+' asks to skip “'+cat+'” — everyone must agree'}]);
     }
-    r.skipReqs[cat].agree[myId]=true; // proposer agrees automatically
-    finalizeSkipIfUnanimous(r,cat);
+    r.skipReqs[ci].agree[myId]=true; // proposer agrees automatically
+    finalizeSkipIfUnanimous(r,ci);
     return r;
   });
 }
 function agreeSkip(cat){
   var myId=S.player.id;
   txRoom(S.roomId,function(r){
-    if(!r.skipReqs||!r.skipReqs[cat])return;
-    if(!r.skipReqs[cat].agree)r.skipReqs[cat].agree={};
-    r.skipReqs[cat].agree[myId]=true;
-    finalizeSkipIfUnanimous(r,cat);
+    var ci=_catIndex(r,cat);
+    if(ci<0||!r.skipReqs||!r.skipReqs[ci])return;
+    if(!r.skipReqs[ci].agree)r.skipReqs[ci].agree={};
+    r.skipReqs[ci].agree[myId]=true;
+    finalizeSkipIfUnanimous(r,ci);
     return r;
   });
 }
 function dismissSkip(cat){
   var nm=S.player.name;
   txRoom(S.roomId,function(r){
-    if(r.skipReqs&&r.skipReqs[cat]){
-      delete r.skipReqs[cat];
+    var ci=_catIndex(r,cat);
+    if(ci>=0&&r.skipReqs&&r.skipReqs[ci]){
+      delete r.skipReqs[ci];
       r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'❌ '+nm+' declined skipping “'+cat+'”'}]);
     }
     return r;
@@ -688,8 +698,9 @@ function renderVoting(){
   var cats=(r.settings.categories||[]).filter(function(c){return skippedV.indexOf(c)<0;}),players=r2.players||[],allAns=r2.submittedAnswers||{};
   var isHost=r2.hostId===p.id;
   var mode=(r.settings&&r.settings.validation)||'vote';
+  var allCatsFull=r.settings.categories||[];
   var matrix={};
-  cats.forEach(function(cat){matrix[cat]={};players.forEach(function(pl){matrix[cat][pl.id]=(allAns[pl.id]||{})[cat]||'';});});
+  cats.forEach(function(cat){var ci=allCatsFull.indexOf(cat);matrix[cat]={};players.forEach(function(pl){matrix[cat][pl.id]=(allAns[pl.id]||{})[ci]||'';});});
   var dupMap={};
   cats.forEach(function(cat){
     var vals=Object.values(matrix[cat]).map(function(v){return v.trim().toLowerCase();}).filter(Boolean);
@@ -791,8 +802,9 @@ function finalizeVotes(){
   var votes=vVotes; // host's vote map, captured for use inside the transaction
   txRoom(S.roomId,function(r){
     var skippedC=r.skippedCats||[];
-    var cats=((r.settings&&r.settings.categories)||[]).filter(function(c){return skippedC.indexOf(c)<0;}),players=r.players||[],allAns=r.submittedAnswers||{};
-    var matrix={};cats.forEach(function(cat){matrix[cat]={};players.forEach(function(pl){matrix[cat][pl.id]=(allAns[pl.id]||{})[cat]||'';});});
+    var allCatsFull=(r.settings&&r.settings.categories)||[];
+    var cats=allCatsFull.filter(function(c){return skippedC.indexOf(c)<0;}),players=r.players||[],allAns=r.submittedAnswers||{};
+    var matrix={};cats.forEach(function(cat){var ci=allCatsFull.indexOf(cat);matrix[cat]={};players.forEach(function(pl){matrix[cat][pl.id]=(allAns[pl.id]||{})[ci]||'';});});
     var dupMap={};cats.forEach(function(cat){
       var vals=Object.values(matrix[cat]).map(function(v){return v.trim().toLowerCase();}).filter(Boolean);
       var cnt={};vals.forEach(function(v){cnt[v]=(cnt[v]||0)+1;});
