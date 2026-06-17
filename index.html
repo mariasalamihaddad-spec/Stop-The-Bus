@@ -410,7 +410,7 @@ function renderHome(){
 }
 
 // ── LOBBY
-var showSettings=false,lobbyBundle='classic',lobbyRounds=3,lobbyTimer=90,lobbyCustom='',lobbyValidation='vote';
+var showSettings=false,lobbyBundle='classic',lobbyRounds=3,lobbyTimer=90,lobbyCustom='',lobbyValidation='host';
 function renderLobby(){
   var p=S.player,r=S.room;
   if(!r){document.getElementById('app').innerHTML='<div class="screen tc"><p>Loading...</p></div>';return;}
@@ -746,20 +746,33 @@ function renderVoting(){
   // Determine who can vote on which cells
   function canVote(plId){
     if(mode==='auto')return false;
-    if(mode==='host')return isHost&&plId!==p.id;
+    if(mode==='host')return isHost; // host scores every answer, including their own
     return plId!==p.id; // vote mode
   }
   var loadingBanner=(mode==='auto'&&!vAutoChecked)?'<div class="card-sm tc" style="background:var(--bg3);border-color:var(--accent4)"><div style="font-size:20px;margin-bottom:4px">🔍</div><div style="font-weight:700;color:var(--accent4)">Checking words against dictionary...</div></div>':'';
+  if(mode==='host'&&isHost){loadingBanner+='<div class="card-sm tc" style="background:var(--bg3);border-color:var(--accent4);font-size:13px;color:var(--text2)">👑 Tap <strong style="color:#22c55e">10</strong> (unique), <strong style="color:#f97316">5</strong> (duplicate) or <strong style="color:#ef4444">0</strong> (invalid) on each answer, then press <strong>Calculate Scores</strong>.</div>';}
 
   // Table: columns = categories, rows = players
   var thCells='<th style="position:sticky;left:0;background:var(--card2);padding:8px 12px;text-align:left;font-size:12px;color:var(--text2);z-index:2;min-width:90px">Player</th>'+cats.map(function(cat){return '<th style="padding:8px 12px;text-align:left;font-size:11px;font-weight:800;color:var(--accent4);text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;min-width:120px">'+escapeHtml(cat)+'</th>';}).join('');
   var tbRows=players.map(function(pl){
     var tds=cats.map(function(cat){
       var ans=(matrix[cat][pl.id]||'').trim(),isDup=ans&&dupMap[cat][pl.id]==='dup',key=cat+'||'+pl.id,keyAttr=escapeHtml(key),v=vVotes[key];
-      var bg=!ans?'var(--bg2)':v==='reject'?'var(--bad-bg)':isDup?'var(--dup-bg)':'var(--ok-bg)';
-      var tc=!ans?'var(--text3)':v==='reject'?'var(--bad-text)':isDup?'var(--dup-text)':'var(--ok-text)';
+      // In host mode the value is a number of points (10/5/0). Suggested default: 5 if duplicate, else 10.
+      var hostPts=(typeof v==='number')?v:(isDup?5:10);
+      var bg,tc;
+      if(!ans){bg='var(--bg2)';tc='var(--text3)';}
+      else if(mode==='host'){
+        bg=hostPts===0?'var(--bad-bg)':hostPts===5?'var(--dup-bg)':'var(--ok-bg)';
+        tc=hostPts===0?'var(--bad-text)':hostPts===5?'var(--dup-text)':'var(--ok-text)';
+      } else {
+        bg=v==='reject'?'var(--bad-bg)':isDup?'var(--dup-bg)':'var(--ok-bg)';
+        tc=v==='reject'?'var(--bad-text)':isDup?'var(--dup-text)':'var(--ok-text)';
+      }
       var voteBtns='';
-      if(ans&&canVote(pl.id)){
+      if(ans&&mode==='host'&&isHost){
+        var pb=function(val,col){var on=hostPts===val;return '<button class="pbtn" data-key="'+keyAttr+'" data-pts="'+val+'" style="flex:1;padding:3px 0;border-radius:6px;border:1.5px solid '+col+';background:'+(on?col:'transparent')+';color:'+(on?'#fff':col)+';font-weight:800;font-size:12px;cursor:pointer">'+val+'</button>';};
+        voteBtns='<div style="display:flex;gap:3px;margin-top:4px">'+pb(10,'#22c55e')+pb(5,'#f97316')+pb(0,'#ef4444')+'</div>';
+      } else if(ans&&canVote(pl.id)){
         voteBtns='<div style="display:flex;gap:3px;margin-top:4px"><button class="vbtn vok'+(v==='accept'?' on':'')+'" data-key="'+keyAttr+'" data-v="accept">✓</button><button class="vbtn vno'+(v==='reject'?' on':'')+'" data-key="'+keyAttr+'" data-v="reject">✗</button></div>';
       } else if(ans&&mode==='auto'&&vAutoChecked){
         voteBtns='<div style="font-size:10px;margin-top:3px;font-weight:700;color:'+(v==='reject'?'var(--red)':'var(--green)')+'">'+(v==='reject'?'✗ Invalid':'✓ Valid')+'</div>';
@@ -780,6 +793,7 @@ function renderVoting(){
 
   document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="tc"><h1 style="font-size:28px;font-weight:900;color:var(--accent4)">Answer Review</h1><p style="color:var(--text2);font-size:14px">Letter was <strong style="color:var(--accent);font-size:18px">'+S.letter+'</strong> · <span style="color:var(--accent4)">'+modeLabel+'</span></p></div>'+loadingBanner+cats_html+'<div class="chat-box"><div class="chat-msgs" id="vchat">'+chatH(r2.chat||[])+'</div><div class="chat-footer"><input class="inp" id="vchat-inp" placeholder="Discuss..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="vchat-send">↑</button></div></div>'+hostFinalize+'</div></div>';
   document.querySelectorAll('.vbtn').forEach(function(b){b.onclick=function(){vVotes[b.dataset.key]=b.dataset.v;renderVoting();};});
+  document.querySelectorAll('.pbtn').forEach(function(b){b.onclick=function(){vVotes[b.dataset.key]=+b.dataset.pts;renderVoting();};});
   var fin=document.getElementById('finalize-btn');if(fin)fin.onclick=finalizeVotes;
   var vci=document.getElementById('vchat-inp'),vcs=document.getElementById('vchat-send');
   if(vci)vci.addEventListener('keydown',function(e){if(e.key==='Enter')sendChat('vote');});
@@ -811,12 +825,20 @@ function finalizeVotes(){
       dupMap[cat]={};
       players.forEach(function(pl){var n=(matrix[cat][pl.id]||'').trim().toLowerCase();dupMap[cat][pl.id]=n&&cnt[n]>1?'dup':'ok';});
     });
+    var mode=(r.settings&&r.settings.validation)||'vote';
     var add={};players.forEach(function(pl){add[pl.id]=0;});
     cats.forEach(function(cat){players.forEach(function(pl){
       var key=cat+'||'+pl.id,ans=(matrix[cat][pl.id]||'').trim();
-      if(!ans||votes[key]==='reject')return;
-      // single player gets full points (no dups possible), multiplayer: dup=5, unique=10
-      add[pl.id]+=players.length===1?10:(dupMap[cat][pl.id]==='dup'?5:10);
+      if(!ans)return;
+      if(mode==='host'){
+        // Host assigned exact points (10/5/0). Untouched answers use the suggested default.
+        var pts=(typeof votes[key]==='number')?votes[key]:(players.length===1?10:(dupMap[cat][pl.id]==='dup'?5:10));
+        add[pl.id]+=pts;
+      } else {
+        if(votes[key]==='reject')return;
+        // single player gets full points (no dups possible), multiplayer: dup=5, unique=10
+        add[pl.id]+=players.length===1?10:(dupMap[cat][pl.id]==='dup'?5:10);
+      }
     });});
     if(!r.scores)r.scores={};
     players.forEach(function(pl){r.scores[pl.id]=(r.scores[pl.id]||0)+add[pl.id];r.players.forEach(function(rpl){if(rpl.id===pl.id)rpl.score=r.scores[pl.id];});});
