@@ -395,11 +395,12 @@ function finishWelcome(){
 var homeMode='',joinCode='';
 function renderHome(){
   var p=S.player;
-  var main=homeMode===''?'<button class="btn btn-primary btn-big btn-full" id="h-public">🌐 Create Public Room</button><button class="btn btn-secondary btn-big btn-full" id="h-private" style="margin-top:10px">🔒 Create Private Room</button><button class="btn btn-teal btn-big btn-full" id="h-join-mode" style="margin-top:10px">🔑 Join with Code</button>':'<div class="card col gap3"><h2 style="font-weight:800;font-size:22px">Enter Room Code</h2><input class="inp" id="jcode" placeholder="XXXXXX" maxlength="6" value="'+joinCode+'" style="font-size:30px;text-align:center;letter-spacing:8px;font-weight:900;padding:16px"><div class="row gap2"><button class="btn btn-secondary" id="h-back">← Back</button><button class="btn btn-primary btn-full" id="h-do-join">Join →</button></div></div>';
+  var main=homeMode===''?'<button class="btn btn-primary btn-big btn-full" id="h-public">🌐 Create Public Room</button><button class="btn btn-secondary btn-big btn-full" id="h-private" style="margin-top:10px">🔒 Create Private Room</button><button class="btn btn-teal btn-big btn-full" id="h-join-public" style="margin-top:10px">🎲 Join Public Game</button><button class="btn btn-teal btn-big btn-full" id="h-join-mode" style="margin-top:10px">🔑 Join with Code</button>':'<div class="card col gap3"><h2 style="font-weight:800;font-size:22px">Enter Room Code</h2><input class="inp" id="jcode" placeholder="XXXXXX" maxlength="6" value="'+joinCode+'" style="font-size:30px;text-align:center;letter-spacing:8px;font-weight:900;padding:16px"><div class="row gap2"><button class="btn btn-secondary" id="h-back">← Back</button><button class="btn btn-primary btn-full" id="h-do-join">Join →</button></div></div>';
   document.getElementById('app').innerHTML='<div class="screen"><div class="maxw fa col gap4"><div class="row center between" style="margin-bottom:4px">'+avEl(p.avatar,p.color)+'<div style="margin-left:10px;flex:1"><div style="font-weight:800">'+p.name+'</div><div style="color:var(--text3);font-size:12px">Ready to play</div></div><div style="font-size:36px">🚌</div></div>'+main+'<div style="background:var(--bg2);border-radius:var(--r);padding:14px;font-size:13px;color:var(--text2);line-height:1.7"><strong style="color:var(--accent4)">How to play:</strong> Fill words for each category starting with the random letter. Press <strong style="color:var(--red)">STOP THE BUS</strong> when all fields are done, or wait for time to run out. Most unique valid answers wins! 🏆</div></div></div>';
   if(homeMode===''){
     document.getElementById('h-public').onclick=function(){createRoom(false);};
     document.getElementById('h-private').onclick=function(){createRoom(true);};
+    document.getElementById('h-join-public').onclick=joinPublic;
     document.getElementById('h-join-mode').onclick=function(){homeMode='join';renderHome();};
   } else {
     var jc=document.getElementById('jcode');
@@ -488,7 +489,10 @@ function renderGame(){
   var filled=activeCats.filter(function(c){return (gAnswers[c]||'').trim().length>=3;}).length;
   if(gStopAnim){
     document.getElementById('app').innerHTML='<div class="screen tc"><div class="pa col gap4 center"><div style="font-size:clamp(60px,15vw,100px);animation:busin .8s cubic-bezier(.175,.885,.32,1.275)">🚌</div><h1 style="font-size:clamp(28px,7vw,52px);font-weight:900;color:var(--red);letter-spacing:1px">STOP THE BUS!</h1><p style="color:var(--text2);font-size:18px"><strong style="color:var(--accent)">'+escapeHtml(gStopperName)+'</strong> stopped the bus!</p></div></div>';
-    setTimeout(function(){gStopAnim=false;renderGame();bindGame();},2500);return;
+    // NOTE: do NOT schedule a renderGame() here. The transition to the review
+    // screen (in doStop / the roundStopped listener) owns the 2.5s timer; a second
+    // timer here would re-draw the game screen on top of the review table.
+    return;
   }
   var inputsHTML=cats.map(function(cat){
     if(skipped.indexOf(cat)>=0){
@@ -503,7 +507,8 @@ function renderGame(){
   var timerSec=r.settings.timerSec;
   var isHost=r.hostId===S.player.id;
   var endGameBtn=isHost?'<button class="btn btn-danger btn-sm" id="end-game-btn" title="End game and show overall scores">🏁 End Game</button>':'';
-  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center gap3"><div id="timer-wrap" style="flex-shrink:0">'+timerSVG(_tl||timerSec,timerSec)+'</div><div style="flex:1"><div class="row center gap2" style="margin-bottom:4px"><span style="color:var(--text2);font-size:12px">Round '+((r.currentRound||0)+1)+'/'+r.totalRounds+'</span>'+(gEnded?'<span class="badge" style="background:var(--bad-bg);color:var(--bad-text)">Time\'s up!</span>':'')+'</div><div style="height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;border-radius:3px;background:var(--green);width:'+(filled/(activeCats.length||1)*100)+'%;transition:width .3s"></div></div><span style="font-size:12px;color:'+(allFilled?'var(--green)':'var(--text2)')+'">'+(allFilled?'✅ All filled!':filled+'/'+activeCats.length+' filled')+'</span></div><div class="tc" style="background:var(--bg2);border-radius:var(--r);padding:6px 14px;border:1.5px solid var(--border2);flex-shrink:0"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">Letter</div><div style="font-size:38px;font-weight:900;color:var(--accent);line-height:1.1">'+letter+'</div></div></div>'+(endGameBtn?'<div class="row" style="justify-content:flex-end">'+endGameBtn+'</div>':'')+skipBannerHTML+'<div class="col gap2">'+inputsHTML+'</div>'+(!gEnded?'<button class="stopbtn" id="stop-btn">🚌 STOP THE BUS!</button>':'')+'<div class="chat-box"><div class="chat-msgs" id="game-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="gchat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="gchat-send">↑</button></div></div></div></div>';
+  var leaveBtn='<button class="btn btn-secondary btn-sm" id="leave-game-btn">🚪 Leave</button>';
+  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center gap3"><div id="timer-wrap" style="flex-shrink:0">'+timerSVG(_tl||timerSec,timerSec)+'</div><div style="flex:1"><div class="row center gap2" style="margin-bottom:4px"><span style="color:var(--text2);font-size:12px">Round '+((r.currentRound||0)+1)+'/'+r.totalRounds+'</span>'+(gEnded?'<span class="badge" style="background:var(--bad-bg);color:var(--bad-text)">Time\'s up!</span>':'')+'</div><div style="height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;border-radius:3px;background:var(--green);width:'+(filled/(activeCats.length||1)*100)+'%;transition:width .3s"></div></div><span style="font-size:12px;color:'+(allFilled?'var(--green)':'var(--text2)')+'">'+(allFilled?'✅ All filled!':filled+'/'+activeCats.length+' filled')+'</span></div><div class="tc" style="background:var(--bg2);border-radius:var(--r);padding:6px 14px;border:1.5px solid var(--border2);flex-shrink:0"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">Letter</div><div style="font-size:38px;font-weight:900;color:var(--accent);line-height:1.1">'+letter+'</div></div></div>'+'<div class="row gap2" style="justify-content:flex-end">'+leaveBtn+endGameBtn+'</div>'+skipBannerHTML+'<div class="col gap2">'+inputsHTML+'</div>'+(!gEnded?'<button class="stopbtn" id="stop-btn">🚌 STOP THE BUS!</button>':'')+'<div class="chat-box"><div class="chat-msgs" id="game-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="gchat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="gchat-send">↑</button></div></div></div></div>';
   bindGame();scrollChat('game-chat');
 }
 function bindGame(){
@@ -524,6 +529,7 @@ function bindGame(){
   document.querySelectorAll('.skip-dismiss').forEach(function(b){b.onclick=function(){dismissSkip(b.dataset.cat);};});
 
   var ebg=document.getElementById('end-game-btn');if(ebg)ebg.onclick=hostEndGame;
+  var lgb=document.getElementById('leave-game-btn');if(lgb)lgb.onclick=function(){showConfirmModal('Leave the game?',leaveRoom);};
   var gci=document.getElementById('gchat-inp'),gcs=document.getElementById('gchat-send');
   if(gci)gci.addEventListener('keydown',function(e){if(e.key==='Enter')sendChat('game');});
   if(gcs)gcs.onclick=function(){sendChat('game');};
@@ -794,10 +800,11 @@ function renderVoting(){
     hostFinalize='<div class="tc" style="color:var(--text2);padding:14px">⌛ Waiting for host...</div>';
   }
 
-  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="tc"><h1 style="font-size:28px;font-weight:900;color:var(--accent4)">Answer Review</h1><p style="color:var(--text2);font-size:14px">Letter was <strong style="color:var(--accent);font-size:18px">'+S.letter+'</strong> · <span style="color:var(--accent4)">'+modeLabel+'</span></p></div>'+loadingBanner+cats_html+'<div class="chat-box"><div class="chat-msgs" id="vchat">'+chatH(r2.chat||[])+'</div><div class="chat-footer"><input class="inp" id="vchat-inp" placeholder="Discuss..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="vchat-send">↑</button></div></div>'+hostFinalize+'</div></div>';
+  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="tc"><h1 style="font-size:28px;font-weight:900;color:var(--accent4)">Answer Review</h1><p style="color:var(--text2);font-size:14px">Letter was <strong style="color:var(--accent);font-size:18px">'+S.letter+'</strong> · <span style="color:var(--accent4)">'+modeLabel+'</span></p></div>'+loadingBanner+cats_html+'<div class="chat-box"><div class="chat-msgs" id="vchat">'+chatH(r2.chat||[])+'</div><div class="chat-footer"><input class="inp" id="vchat-inp" placeholder="Discuss..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="vchat-send">↑</button></div></div>'+hostFinalize+'<button class="btn btn-secondary btn-full" id="v-leave">🚪 Leave Game</button></div></div>';
   document.querySelectorAll('.vbtn').forEach(function(b){b.onclick=function(){vVotes[b.dataset.key]=b.dataset.v;renderVoting();};});
   document.querySelectorAll('.pbtn').forEach(function(b){b.onclick=function(){vVotes[b.dataset.key]=+b.dataset.pts;renderVoting();};});
   var fin=document.getElementById('finalize-btn');if(fin)fin.onclick=finalizeVotes;
+  var vlv=document.getElementById('v-leave');if(vlv)vlv.onclick=function(){showConfirmModal('Leave the game?',leaveRoom);};
   var vci=document.getElementById('vchat-inp'),vcs=document.getElementById('vchat-send');
   if(vci)vci.addEventListener('keydown',function(e){if(e.key==='Enter')sendChat('vote');});
   if(vcs)vcs.onclick=function(){sendChat('vote');};
@@ -889,6 +896,29 @@ function createRoom(isPrivate){
   saveRoom(id,r);showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;lobbyCustom='';
   try{sessionStorage.setItem('stb_room',id);}catch(e){}
   setState({roomId:id,room:r,screen:'lobby'});
+}
+function joinPublic(){
+  if(!_db){notify('Not connected yet — try again','error');return;}
+  notify('Finding a public game…','info');
+  _db.ref('rooms').once('value').then(function(snap){
+    var rooms=snap.val()||{};
+    var myId=S.player.id;
+    var avail=Object.keys(rooms).filter(function(id){
+      var r=rooms[id];if(!r||r.isPrivate||r.status!=='lobby')return false;
+      var pls=r.players?(Array.isArray(r.players)?r.players:Object.values(r.players)):[];
+      if(pls.length>=8)return false;
+      if(pls.find(function(x){return x&&x.id===myId;}))return false; // skip rooms we're already in
+      return true;
+    });
+    if(!avail.length){notify('No available games right now','warn');return;}
+    // Prefer the fullest joinable lobby so players cluster into one game
+    avail.sort(function(a,b){
+      var pa=rooms[a].players?(Array.isArray(rooms[a].players)?rooms[a].players.length:Object.keys(rooms[a].players).length):0;
+      var pb=rooms[b].players?(Array.isArray(rooms[b].players)?rooms[b].players.length:Object.keys(rooms[b].players).length):0;
+      return pb-pa;
+    });
+    joinCode=avail[0];doJoin();
+  }).catch(function(){notify('Could not search for games','error');});
 }
 function doJoin(){
   var c=joinCode.trim().toUpperCase();
