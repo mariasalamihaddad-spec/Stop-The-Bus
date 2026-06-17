@@ -474,7 +474,7 @@ function renderRoundStart(){
 }
 
 // ── GAME
-var gAnswers={},gEnded=false,gStopAnim=false,gStopperName='',_gameSkipSig='';
+var gAnswers={},gEnded=false,gStopAnim=false,gStopperName='',_gameSkipSig='',_seenNoticeTs=0;
 function renderGame(){
   var r=S.room,cats=r.settings.categories,letter=S.letter;
   var skipped=r.skippedCats||[];
@@ -555,9 +555,11 @@ function startGameTimer(){
       });
     }
   });
+  var r0n=getRoom(S.roomId)||S.room;_seenNoticeTs=(r0n&&r0n.lastNotice&&r0n.lastNotice.ts)||0;
   unbind();
   addBC(function(r2){
     if(!r2)r2=getRoom(S.roomId);if(!r2)return;S.room=r2;
+    if(r2.lastNotice&&r2.lastNotice.ts&&r2.lastNotice.ts!==_seenNoticeTs){_seenNoticeTs=r2.lastNotice.ts;notify(r2.lastNotice.t,'warn');}
     if(r2.gameEnded){unbind();stopTimer();setState({screen:'final',finalScores:r2.scores||{}});return;}
     if(r2.currentLetter&&r2.currentLetter!==S.letter&&!r2.roundStopped&&!gEnded){stopTimer();gAnswers={};gEnded=false;gStopAnim=false;setState({room:r2,letter:r2.currentLetter,screen:'roundstart'});return;}
     if(r2.roundStopped&&!gEnded){
@@ -685,7 +687,8 @@ function dismissSkip(cat){
     var ci=_catIndex(r,cat);
     if(ci>=0&&r.skipReqs&&r.skipReqs[ci]){
       delete r.skipReqs[ci];
-      r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'❌ '+nm+' declined skipping “'+cat+'”'}]);
+      r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'❌ '+nm+' denied skipping “'+cat+'”'}]);
+      r.lastNotice={t:nm+' denied the request to skip “'+cat+'”',ts:Date.now()};
     }
     return r;
   });
@@ -786,7 +789,7 @@ function renderVoting(){
   var hostFinalize='';
   if(isHost){
     var disabled=(mode==='auto'&&!vAutoChecked)?'disabled':'';
-    hostFinalize='<button class="btn btn-primary btn-big btn-full" id="finalize-btn" '+disabled+'>Calculate Scores →</button>';
+    hostFinalize='<button class="btn btn-primary btn-big btn-full" id="finalize-btn" '+disabled+'>🏁 Finish & Tally Scores</button>';
   } else {
     hostFinalize='<div class="tc" style="color:var(--text2);padding:14px">⌛ Waiting for host...</div>';
   }
