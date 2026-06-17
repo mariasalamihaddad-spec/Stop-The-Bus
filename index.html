@@ -472,20 +472,34 @@ function renderRoundStart(){
 }
 
 // ── GAME
-var gAnswers={},gEnded=false,gStopAnim=false,gStopperName='';
+var gAnswers={},gEnded=false,gStopAnim=false,gStopperName='',_gameSkipSig='';
 function renderGame(){
   var r=S.room,cats=r.settings.categories,letter=S.letter;
-  var allFilled=cats.every(function(c){return (gAnswers[c]||'').trim().length>=3;});
-  var filled=cats.filter(function(c){return (gAnswers[c]||'').trim().length>=3;}).length;
+  var skipped=r.skippedCats||[];
+  var skipReqs=r.skipReqs||{};
+  var activeCats=cats.filter(function(c){return skipped.indexOf(c)<0;});
+  // keep the realtime listener in sync so it only re-renders on a real change
+  _gameSkipSig=JSON.stringify(skipReqs)+'|'+skipped.join(',');
+  var allFilled=activeCats.every(function(c){return (gAnswers[c]||'').trim().length>=3;});
+  var filled=activeCats.filter(function(c){return (gAnswers[c]||'').trim().length>=3;}).length;
   if(gStopAnim){
     document.getElementById('app').innerHTML='<div class="screen tc"><div class="pa col gap4 center"><div style="font-size:clamp(60px,15vw,100px);animation:busin .8s cubic-bezier(.175,.885,.32,1.275)">🚌</div><h1 style="font-size:clamp(28px,7vw,52px);font-weight:900;color:var(--red);letter-spacing:1px">STOP THE BUS!</h1><p style="color:var(--text2);font-size:18px"><strong style="color:var(--accent)">'+escapeHtml(gStopperName)+'</strong> stopped the bus!</p></div></div>';
     setTimeout(function(){gStopAnim=false;renderGame();bindGame();},2500);return;
   }
-  var inputsHTML=cats.map(function(cat){var val=gAnswers[cat]||'';var done=val.trim().length>0;return '<div class="grow'+(done?' done':'')+'"><div class="clabel">'+escapeHtml(cat)+'</div><input class="ginp game-inp" data-cat="'+escapeHtml(cat)+'" placeholder="'+letter+'..." value="'+val+'" maxlength="30" '+(gEnded?'disabled':'')+' autocomplete="off" autocorrect="off" spellcheck="false"><span style="font-size:16px">'+(done?'✅':'⬜')+'</span></div>';}).join('');
+  var inputsHTML=cats.map(function(cat){
+    if(skipped.indexOf(cat)>=0){
+      return '<div class="grow" style="opacity:.55"><div class="clabel">'+escapeHtml(cat)+'</div><span style="flex:1;font-style:italic;color:var(--text3);font-size:13px">Skipped this round</span><span style="font-size:16px">⏭️</span></div>';
+    }
+    var val=gAnswers[cat]||'';var done=val.trim().length>0;var hasReq=!!skipReqs[cat];
+    return '<div class="grow'+(done?' done':'')+'"><div class="clabel">'+escapeHtml(cat)+'</div><input class="ginp game-inp" data-cat="'+escapeHtml(cat)+'" placeholder="'+letter+'..." value="'+escapeHtml(val)+'" maxlength="30" '+(gEnded?'disabled':'')+' autocomplete="off" autocorrect="off" spellcheck="false"><button class="btn-skip-req" data-cat="'+escapeHtml(cat)+'" title="Propose skipping this category (needs everyone to agree)" style="background:transparent;border:none;cursor:pointer;font-size:15px;opacity:'+(hasReq?'1':'.45')+'" '+(gEnded?'disabled':'')+'>🙋</button><span style="font-size:16px">'+(done?'✅':'⬜')+'</span></div>';}).join('');
+  var skipBannerHTML=Object.keys(skipReqs).map(function(cat){
+    var req=skipReqs[cat]||{};var agreeCount=Object.keys(req.agree||{}).length;var total=(r.players||[]).length;var iAgreed=req.agree&&req.agree[S.player.id];
+    return '<div class="card-sm row center between gap2" style="border-color:var(--accent4)"><div style="font-size:13px;flex:1"><strong>🙋 Skip “'+escapeHtml(cat)+'”?</strong><br><span style="color:var(--text2);font-size:11px">by '+escapeHtml(req.by||'')+' · '+agreeCount+'/'+total+' agreed — needs everyone</span></div><div class="row gap2"><button class="btn btn-sm '+(iAgreed?'btn-secondary':'btn-teal')+' skip-agree" data-cat="'+escapeHtml(cat)+'" '+(iAgreed?'disabled':'')+'>'+(iAgreed?'✓ Agreed':'Agree')+'</button><button class="btn btn-sm btn-danger skip-dismiss" data-cat="'+escapeHtml(cat)+'">No</button></div></div>';
+  }).join('');
   var timerSec=r.settings.timerSec;
   var isHost=r.hostId===S.player.id;
   var endGameBtn=isHost?'<button class="btn btn-danger btn-sm" id="end-game-btn" title="End game and show overall scores">🏁 End Game</button>':'';
-  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center gap3"><div id="timer-wrap" style="flex-shrink:0">'+timerSVG(_tl||timerSec,timerSec)+'</div><div style="flex:1"><div class="row center gap2" style="margin-bottom:4px"><span style="color:var(--text2);font-size:12px">Round '+((r.currentRound||0)+1)+'/'+r.totalRounds+'</span>'+(gEnded?'<span class="badge" style="background:var(--bad-bg);color:var(--bad-text)">Time\'s up!</span>':'')+'</div><div style="height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;border-radius:3px;background:var(--green);width:'+(filled/cats.length*100)+'%;transition:width .3s"></div></div><span style="font-size:12px;color:'+(allFilled?'var(--green)':'var(--text2)')+'">'+(allFilled?'✅ All filled!':filled+'/'+cats.length+' filled')+'</span></div><div class="tc" style="background:var(--bg2);border-radius:var(--r);padding:6px 14px;border:1.5px solid var(--border2);flex-shrink:0"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">Letter</div><div style="font-size:38px;font-weight:900;color:var(--accent);line-height:1.1">'+letter+'</div></div></div>'+(endGameBtn?'<div class="row" style="justify-content:flex-end">'+endGameBtn+'</div>':'')+'<div class="col gap2">'+inputsHTML+'</div>'+(!gEnded?'<button class="stopbtn" id="stop-btn" '+(allFilled?'':'disabled')+'>🚌 STOP THE BUS!</button>':'')+'<div class="chat-box"><div class="chat-msgs" id="game-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="gchat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="gchat-send">↑</button></div></div></div></div>';
+  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center gap3"><div id="timer-wrap" style="flex-shrink:0">'+timerSVG(_tl||timerSec,timerSec)+'</div><div style="flex:1"><div class="row center gap2" style="margin-bottom:4px"><span style="color:var(--text2);font-size:12px">Round '+((r.currentRound||0)+1)+'/'+r.totalRounds+'</span>'+(gEnded?'<span class="badge" style="background:var(--bad-bg);color:var(--bad-text)">Time\'s up!</span>':'')+'</div><div style="height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;border-radius:3px;background:var(--green);width:'+(filled/(activeCats.length||1)*100)+'%;transition:width .3s"></div></div><span style="font-size:12px;color:'+(allFilled?'var(--green)':'var(--text2)')+'">'+(allFilled?'✅ All filled!':filled+'/'+activeCats.length+' filled')+'</span></div><div class="tc" style="background:var(--bg2);border-radius:var(--r);padding:6px 14px;border:1.5px solid var(--border2);flex-shrink:0"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">Letter</div><div style="font-size:38px;font-weight:900;color:var(--accent);line-height:1.1">'+letter+'</div></div></div>'+(endGameBtn?'<div class="row" style="justify-content:flex-end">'+endGameBtn+'</div>':'')+skipBannerHTML+'<div class="col gap2">'+inputsHTML+'</div>'+(!gEnded?'<button class="stopbtn" id="stop-btn">🚌 STOP THE BUS!</button>':'')+'<div class="chat-box"><div class="chat-msgs" id="game-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="gchat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="gchat-send">↑</button></div></div></div></div>';
   bindGame();scrollChat('game-chat');
 }
 function bindGame(){
@@ -497,12 +511,13 @@ function bindGame(){
       var done=v.trim().length>=3;
       var row=inp.closest('.grow');if(row)row.classList.toggle('done',done);
       var tick=inp.parentElement.querySelector('span');if(tick)tick.textContent=done?'✅':'⬜';
-      var sb=document.getElementById('stop-btn');
-      if(sb){var all=S.room.settings.categories.every(function(c){return (gAnswers[c]||'').trim().length>=3;});sb.disabled=!all;}
     });
     inp.addEventListener('blur',function(){});
   });
   var sb=document.getElementById('stop-btn');if(sb)sb.onclick=doStop;
+  document.querySelectorAll('.btn-skip-req').forEach(function(b){b.onclick=function(){proposeSkip(b.dataset.cat);};});
+  document.querySelectorAll('.skip-agree').forEach(function(b){b.onclick=function(){agreeSkip(b.dataset.cat);};});
+  document.querySelectorAll('.skip-dismiss').forEach(function(b){b.onclick=function(){dismissSkip(b.dataset.cat);};});
 
   var ebg=document.getElementById('end-game-btn');if(ebg)ebg.onclick=hostEndGame;
   var gci=document.getElementById('gchat-inp'),gcs=document.getElementById('gchat-send');
@@ -561,53 +576,116 @@ function startGameTimer(){
       },2500);
       renderGame();return;
     }
+    // A skip proposal was raised, agreed, dismissed, or a category got skipped — re-render so everyone sees it
+    var sig=JSON.stringify(r2.skipReqs||{})+'|'+((r2.skippedCats||[]).join(','));
+    if(sig!==_gameSkipSig){_gameSkipSig=sig;renderGame();return;}
     var ce=document.getElementById('game-chat');if(ce){ce.innerHTML=chatH(r2.chat||[]);ce.scrollTop=ce.scrollHeight;}
   });
 }
 function doStop(){
   if(gEnded)return;
-  var cats=S.room.settings.categories;
-  if(!cats.every(function(c){return (gAnswers[c]||'').trim().length>=3;})){notify('Fill all categories first!','error');return;}
+  var allCats=S.room.settings.categories;
+  var skipped=S.room.skippedCats||[];
+  var activeCats=allCats.filter(function(c){return skipped.indexOf(c)<0;});
+  // Only the categories that haven't been skipped need to be filled
+  if(!activeCats.every(function(c){return (gAnswers[c]||'').trim().length>=3;})){
+    notify('Please fill in all blanks first — or 🙋 request to skip a category.','error');return;
+  }
 
   // Build the clean answer map before entering the transaction
   var cleanAnswers={};
-  cats.forEach(function(k){cleanAnswers[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});
+  allCats.forEach(function(k){cleanAnswers[k]=(gAnswers[k]&&gAnswers[k].trim().length>=3)?gAnswers[k]:'';});
   var playerId=S.player.id, playerName=S.player.name;
 
-  // Transaction prevents two players stopping simultaneously — only the first write wins
-  _db.ref('rooms/'+S.roomId).transaction(function(r){
-    if(!r||r.roundStopped)return; // already stopped — abort so the other player "wins"
-    if(!r.submittedAnswers)r.submittedAnswers={};
-    r.submittedAnswers[playerId]=cleanAnswers;
-    if(!r.submittedPlayers)r.submittedPlayers=[];
-    if(r.submittedPlayers.indexOf(playerId)<0)r.submittedPlayers.push(playerId);
-    r.roundStopped=true;
-    r.stoppedBy=playerName;
-    r.chat=(r.chat||[]).slice(-99).concat([{sys:true,t:'🚌 '+playerName+' stopped the bus!'}]);
-    return r;
-  }, function(err, committed){
-    if(err){notify('Connection error — try again.','error');return;}
-    gEnded=true;stopTimer();
-    if(!committed){
-      // Someone else stopped first; our answers will be submitted by the roundStopped listener
-      notify('Someone else stopped first!','warn');
-      return;
+  // Prime the room ref with one read first (same reason as txRoom): a transaction
+  // run against an empty local cache sees null and aborts, which surfaced as a
+  // "connection error" even though Firebase was reachable.
+  var ref=_db.ref('rooms/'+S.roomId);
+  ref.once('value').then(function(){
+    // Transaction prevents two players stopping simultaneously — only the first write wins
+    ref.transaction(function(r){
+      if(!r||r.roundStopped)return; // already stopped — abort so the other player "wins"
+      if(!r.submittedAnswers)r.submittedAnswers={};
+      r.submittedAnswers[playerId]=cleanAnswers;
+      if(!r.submittedPlayers)r.submittedPlayers=[];
+      if(r.submittedPlayers.indexOf(playerId)<0)r.submittedPlayers.push(playerId);
+      r.roundStopped=true;
+      r.stoppedBy=playerName;
+      r.chat=(r.chat||[]).slice(-99).concat([{sys:true,t:'🚌 '+playerName+' stopped the bus!'}]);
+      return r;
+    }, function(err, committed, snap){
+      if(err){notify('Connection error — try again.','error');return;}
+      gEnded=true;stopTimer();
+      if(!committed){
+        // Someone else stopped first; our answers will be submitted by the roundStopped listener
+        notify('Someone else stopped first!','warn');
+        return;
+      }
+      var val=snap?snap.val():null;if(val)_roomCache[S.roomId]=val;
+      var r=val||getRoom(S.roomId)||S.room;S.room=r;
+      gStopperName=playerName;gStopAnim=true;
+      setTimeout(function(){
+        gStopAnim=false;unbind();
+        vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
+        setState({room:getRoom(S.roomId)||r,screen:'voting'});
+      },2500);
+      renderGame();
+    }, false);
+  }).catch(function(){notify('Connection error — try again.','error');});
+}
+// ── SKIP-CATEGORY REQUESTS (propose nullifying a category; needs everyone to agree)
+function finalizeSkipIfUnanimous(r,cat){
+  var req=r.skipReqs&&r.skipReqs[cat];if(!req)return;
+  var ids=(r.players||[]).map(function(p){return p.id;});
+  var allAgree=ids.length>0&&ids.every(function(id){return req.agree&&req.agree[id];});
+  if(allAgree){
+    if(!r.skippedCats)r.skippedCats=[];
+    if(r.skippedCats.indexOf(cat)<0)r.skippedCats.push(cat);
+    delete r.skipReqs[cat];
+    r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'✅ Everyone agreed — “'+cat+'” is skipped this round'}]);
+  }
+}
+function proposeSkip(cat){
+  if(gEnded)return;
+  var nm=S.player.name,myId=S.player.id;
+  txRoom(S.roomId,function(r){
+    if((r.skippedCats||[]).indexOf(cat)>=0)return; // already skipped
+    if(!r.skipReqs)r.skipReqs={};
+    if(!r.skipReqs[cat]){
+      r.skipReqs[cat]={by:nm,agree:{}};
+      r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'🙋 '+nm+' asks to skip “'+cat+'” — everyone must agree'}]);
     }
-    var r=getRoom(S.roomId)||S.room;S.room=r;
-    gStopperName=playerName;gStopAnim=true;
-    setTimeout(function(){
-      gStopAnim=false;unbind();
-      vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
-      setState({room:r,screen:'voting'});
-    },2500);
-    renderGame();
+    r.skipReqs[cat].agree[myId]=true; // proposer agrees automatically
+    finalizeSkipIfUnanimous(r,cat);
+    return r;
+  });
+}
+function agreeSkip(cat){
+  var myId=S.player.id;
+  txRoom(S.roomId,function(r){
+    if(!r.skipReqs||!r.skipReqs[cat])return;
+    if(!r.skipReqs[cat].agree)r.skipReqs[cat].agree={};
+    r.skipReqs[cat].agree[myId]=true;
+    finalizeSkipIfUnanimous(r,cat);
+    return r;
+  });
+}
+function dismissSkip(cat){
+  var nm=S.player.name;
+  txRoom(S.roomId,function(r){
+    if(r.skipReqs&&r.skipReqs[cat]){
+      delete r.skipReqs[cat];
+      r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'❌ '+nm+' declined skipping “'+cat+'”'}]);
+    }
+    return r;
   });
 }
 // ── VOTING
 var vVotes={},vPhase='vote',vScores={},vAutoChecked=false,vAutoChecking=false,vRoundDelta={};
 function renderVoting(){
   var r2=getRoom(S.roomId)||S.room,r=S.room,p=S.player;
-  var cats=r.settings.categories,players=r2.players||[],allAns=r2.submittedAnswers||{};
+  var skippedV=r2.skippedCats||[];
+  var cats=(r.settings.categories||[]).filter(function(c){return skippedV.indexOf(c)<0;}),players=r2.players||[],allAns=r2.submittedAnswers||{};
   var isHost=r2.hostId===p.id;
   var mode=(r.settings&&r.settings.validation)||'vote';
   var matrix={};
@@ -712,7 +790,8 @@ function renderVoting(){
 function finalizeVotes(){
   var votes=vVotes; // host's vote map, captured for use inside the transaction
   txRoom(S.roomId,function(r){
-    var cats=(r.settings&&r.settings.categories)||[],players=r.players||[],allAns=r.submittedAnswers||{};
+    var skippedC=r.skippedCats||[];
+    var cats=((r.settings&&r.settings.categories)||[]).filter(function(c){return skippedC.indexOf(c)<0;}),players=r.players||[],allAns=r.submittedAnswers||{};
     var matrix={};cats.forEach(function(cat){matrix[cat]={};players.forEach(function(pl){matrix[cat][pl.id]=(allAns[pl.id]||{})[cat]||'';});});
     var dupMap={};cats.forEach(function(cat){
       var vals=Object.values(matrix[cat]).map(function(v){return v.trim().toLowerCase();}).filter(Boolean);
@@ -730,7 +809,7 @@ function finalizeVotes(){
     if(!r.scores)r.scores={};
     players.forEach(function(pl){r.scores[pl.id]=(r.scores[pl.id]||0)+add[pl.id];r.players.forEach(function(rpl){if(rpl.id===pl.id)rpl.score=r.scores[pl.id];});});
     r.lastRoundDelta=add;
-    r.currentRound=(r.currentRound||0)+1;r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.submittedAnswers={};r.submittedPlayers=[];
+    r.currentRound=(r.currentRound||0)+1;r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.submittedAnswers={};r.submittedPlayers=[];r.skipReqs={};r.skippedCats=[];
     r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'Scores calculated for round '+r.currentRound}]);
     return r;
   },function(err,committed,val){
@@ -746,7 +825,7 @@ function goNextRound(){
       unbind();stopTimer();setState({screen:'final',finalScores:(val&&val.scores)||{}});
     });
   } else {
-    txRoom(S.roomId,function(r){r.currentLetter=null;r.status='playing';r.roundStopped=false;return r;},function(err,committed,val){
+    txRoom(S.roomId,function(r){r.currentLetter=null;r.status='playing';r.roundStopped=false;r.skipReqs={};r.skippedCats=[];return r;},function(err,committed,val){
       vVotes={};vPhase='vote';vAutoChecked=false;vAutoChecking=false;
       gAnswers={};gEnded=false;gStopAnim=false;
       if(val)handleGameStart(val);
@@ -769,7 +848,7 @@ function renderFinal(){
 // ── SHARED ACTIONS
 function createRoom(isPrivate){
   var id=rcode(),p=S.player;
-  var r={id:id,isPrivate:isPrivate,hostId:p.id,status:'lobby',players:[{id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0}],settings:{rounds:3,timerSec:90,categories:BUNDLES.classic.cats},chat:[{sys:true,t:'Room '+id+' created — share the code!'}],currentRound:0,totalRounds:3,scores:{},submittedAnswers:{},submittedPlayers:[]};
+  var r={id:id,isPrivate:isPrivate,hostId:p.id,status:'lobby',players:[{id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0}],settings:{rounds:3,timerSec:90,categories:BUNDLES.classic.cats},chat:[{sys:true,t:'Room '+id+' created — share the code!'}],currentRound:0,totalRounds:3,scores:{},submittedAnswers:{},submittedPlayers:[],skipReqs:{},skippedCats:[]};
   saveRoom(id,r);showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;lobbyCustom='';
   try{sessionStorage.setItem('stb_room',id);}catch(e){}
   setState({roomId:id,room:r,screen:'lobby'});
@@ -839,7 +918,7 @@ function hostStart(){
   else cats=BUNDLES[lobbyBundle].cats;
   txRoom(S.roomId,function(r){
     r.settings={rounds:lobbyRounds,timerSec:lobbyTimer,categories:cats,validation:lobbyValidation};
-    r.currentRound=0;r.totalRounds=lobbyRounds;r.scores={};r.status='playing';r.submittedAnswers={};r.submittedPlayers=[];
+    r.currentRound=0;r.totalRounds=lobbyRounds;r.scores={};r.status='playing';r.submittedAnswers={};r.submittedPlayers=[];r.skipReqs={};r.skippedCats=[];
     r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'🚌 Game starting!'}]);
     return r;
   },function(err,committed,val){
@@ -913,7 +992,7 @@ function showChoiceModal(title,msg,labelA,onA,labelB,onB){
 function hostNewLetter(){
   var nm=S.player.name;
   txRoom(S.roomId,function(r){
-    r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.submittedAnswers={};r.submittedPlayers=[];
+    r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.submittedAnswers={};r.submittedPlayers=[];r.skipReqs={};r.skippedCats=[];
     r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'\ud83d\udd04 '+nm+' skipped to a new letter \u2014 this round won\'t count'}]);
     return r;
   },function(err,committed,val){
@@ -941,7 +1020,7 @@ function hostEndGame(){
 
 function playAgain(){
   txRoom(S.roomId,function(r){
-    r.status='lobby';r.currentRound=0;r.scores={};r.submittedAnswers={};r.submittedPlayers=[];r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.gameEnded=false;
+    r.status='lobby';r.currentRound=0;r.scores={};r.submittedAnswers={};r.submittedPlayers=[];r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.gameEnded=false;r.skipReqs={};r.skippedCats=[];
     r.players=(r.players||[]).map(function(pl){pl.score=0;return pl;});
     r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'New game! Back to lobby.'}]);
     return r;
