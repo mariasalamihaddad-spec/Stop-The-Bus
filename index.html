@@ -244,15 +244,23 @@ function txRoom(id, mutate, cb){
     if(cb)cb(null,!!rc,rc||null);
     return;
   }
-  _db.ref('rooms/'+id).transaction(function(cur){
-    if(cur===null)return; // room gone (or cache cold) — abort, never recreate
-    var res=mutate(cur);
-    return res===undefined?cur:res;
-  }, function(err,committed,snap){
-    var val=snap?snap.val():null;
-    if(val)_roomCache[id]=val;
-    if(cb)cb(err,committed,val);
-  }, false);
+  var ref=_db.ref('rooms/'+id);
+  // Prime the cache with one read first. Without this, a device that just
+  // opened the room (e.g. someone joining from a 2nd device) runs the
+  // transaction against an empty local cache, sees null, and aborts — which
+  // looked like a "Firebase connection" error. The read makes the first
+  // transaction pass see the real server data.
+  ref.once('value').then(function(){
+    ref.transaction(function(cur){
+      if(cur===null)return; // room genuinely gone — abort, never recreate
+      var res=mutate(cur);
+      return res===undefined?cur:res;
+    }, function(err,committed,snap){
+      var val=snap?snap.val():null;
+      if(val)_roomCache[id]=val;
+      if(cb)cb(err,committed,val);
+    }, false);
+  }).catch(function(err){ if(cb)cb(err,false,null); });
 }
 // Build this player's cleaned answer map (only 3+ char answers count for points)
 function buildCleanAnswers(cats){
