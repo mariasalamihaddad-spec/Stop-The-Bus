@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Stop the Bus!</title>
+<!-- Warm up + parallel-fetch Firebase so it's ready the instant the app needs it -->
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="dns-prefetch" href="https://www.gstatic.com">
+<link rel="preconnect" href="https://stop-the-bus-53bb1-default-rtdb.asia-southeast1.firebasedatabase.app" crossorigin>
+<link rel="preconnect" href="https://stop-the-bus-53bb1.firebaseapp.com" crossorigin>
+<link rel="preload" as="script" href="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js">
+<link rel="preload" as="script" href="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js">
+<link rel="preload" as="script" href="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root,html[data-theme="dark"]{
@@ -198,8 +206,10 @@ function initFirebase() {
   return new Promise(function(resolve, reject) {
     if (_db && _firebaseUid) { resolve(); return; }
     _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js')
-    .then(function(){ return _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js'); })
-    .then(function(){ return _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js'); })
+    .then(function(){ return Promise.all([
+      _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js'),
+      _loadScript('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js')
+    ]); })
     .then(function(){
       if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
       _db = firebase.database();
@@ -245,12 +255,7 @@ function txRoom(id, mutate, cb){
     return;
   }
   var ref=_db.ref('rooms/'+id);
-  // Prime the cache with one read first. Without this, a device that just
-  // opened the room (e.g. someone joining from a 2nd device) runs the
-  // transaction against an empty local cache, sees null, and aborts — which
-  // looked like a "Firebase connection" error. The read makes the first
-  // transaction pass see the real server data.
-  ref.once('value').then(function(){
+  function runTx(){
     ref.transaction(function(cur){
       if(cur===null)return; // room genuinely gone — abort, never recreate
       var res=mutate(cur);
@@ -260,7 +265,17 @@ function txRoom(id, mutate, cb){
       if(val)_roomCache[id]=val;
       if(cb)cb(err,committed,val);
     }, false);
-  }).catch(function(err){ if(cb)cb(err,false,null); });
+  }
+  // If the persistent realtime listener is already attached to this room, the
+  // local cache is warm, so we can run the transaction immediately (one round
+  // trip). Otherwise prime with a single read first — without it a freshly
+  // opened room (e.g. someone joining) runs against an empty cache, sees null
+  // and aborts, which used to look like a "Firebase connection" error.
+  if(_roomRef && _roomRefId===id){
+    runTx();
+  } else {
+    ref.once('value').then(runTx).catch(function(err){ if(cb)cb(err,false,null); });
+  }
 }
 // Build this player's cleaned answer map (only 3+ char answers count for points)
 // Keyed by category INDEX (not name) — Firebase keys can't contain "/", "." etc,
@@ -292,6 +307,63 @@ function unbind() {
 function addBC(fn) {
   _currentCB = fn;
   if (S.roomId) _ensureListener(S.roomId);
+}
+
+// ── PRESENCE / GHOST CLEANUP
+// Each player writes rooms/<id>/online/<uid>. onDisconnect().remove() clears it
+// automatically when the tab closes or the network drops, so other clients can
+// tell who is actually still here and prune players who vanished.
+var _presenceConnBound=false,_presenceRoom=null;
+function setupPresence(){
+  if(!_db||!S.roomId||!S.player)return;
+  _presenceRoom=S.roomId;
+  function arm(){
+    if(!_presenceRoom||!S.player)return;
+    var pRef=_db.ref('rooms/'+_presenceRoom+'/online/'+S.player.id);
+    pRef.onDisconnect().remove();           // server clears this if we disconnect
+    pRef.set(Date.now()).catch(function(){});
+  }
+  // Re-arm whenever the realtime connection (re)establishes — survives drops/reconnects
+  if(!_presenceConnBound){
+    _presenceConnBound=true;
+    _db.ref('.info/connected').on('value',function(snap){ if(snap.val()===true) arm(); });
+  } else { arm(); }
+}
+function clearPresence(){
+  if(_db&&_presenceRoom&&S.player){
+    var pRef=_db.ref('rooms/'+_presenceRoom+'/online/'+S.player.id);
+    try{pRef.onDisconnect().cancel();}catch(e){}
+    pRef.remove().catch(function(){});
+  }
+  _presenceRoom=null;
+}
+// Remove vanished players (and hand off host) — runs as a transaction so it's
+// safe even if several clients try at once. Only the lowest online uid acts, to
+// avoid every client writing at the same time.
+function maybeReconcile(r){
+  if(!r||!r.players||!S.player)return;
+  var online=r.online||{};
+  var onlineIds=r.players.filter(function(p){return online[p.id]!==undefined;}).map(function(p){return p.id;}).sort();
+  if(!onlineIds.length)return;              // nobody confirmed online — don't touch (presence may be warming up)
+  if(onlineIds[0]!==S.player.id)return;     // someone else is the designated cleaner
+  var ghosts=r.players.filter(function(p){return online[p.id]===undefined;});
+  var hostOffline=!r.players.find(function(p){return p.id===r.hostId&&online[p.id]!==undefined;});
+  // Only prune player rows while in the lobby (never kick someone mid-round); always fix an absent host.
+  var needPrune=(r.status==='lobby')&&ghosts.length>0;
+  if(!needPrune&&!hostOffline)return;
+  txRoom(S.roomId,function(rr){
+    var on=rr.online||{};
+    var alive=(rr.players||[]).filter(function(p){return on[p.id]!==undefined;});
+    if(alive.length===0)return;             // safety: never wipe everyone on a presence glitch
+    var changed=false;
+    if(rr.status==='lobby'&&alive.length!==(rr.players||[]).length){
+      var gone=(rr.players||[]).filter(function(p){return on[p.id]===undefined;});
+      rr.players=alive;changed=true;
+      gone.forEach(function(g){rr.chat=(rr.chat||[]).slice(-100).concat([{sys:true,t:(g.name||'A player')+' left (disconnected)'}]);});
+    }
+    if(!rr.players.find(function(p){return p.id===rr.hostId;})){rr.hostId=rr.players[0].id;changed=true;}
+    return changed?rr:undefined;
+  });
 }
 
 // ── STATE
@@ -371,6 +443,7 @@ var wStep=0,wName='',wAv=Math.floor(Math.random()*AVATARS.length),wCol=Math.floo
 function renderWelcome(){
   if(wStep===0){
     document.getElementById('app').innerHTML='<div class="screen"><div class="maxw fa col gap4"><div class="tc" style="margin-bottom:8px"><div style="font-size:clamp(60px,15vw,90px)">🚌</div><h1 style="font-size:clamp(30px,9vw,58px);font-weight:900;color:var(--accent);line-height:1;letter-spacing:-1px">STOP THE BUS!</h1><p style="color:var(--text2);font-size:16px;margin-top:8px">The ultimate multiplayer word game</p></div><div class="card col gap3"><h2 style="font-size:20px;font-weight:800">What\'s your name?</h2><input class="inp" id="wname" placeholder="Enter username..." maxlength="20" style="font-size:18px;padding:14px" value="'+wName+'"><button class="btn btn-primary btn-big btn-full" id="w-next">Continue →</button></div></div></div>';
+    document.onkeydown=null;
     var n=document.getElementById('wname');
     if(n){n.focus();n.addEventListener('input',function(){wName=n.value});n.addEventListener('keydown',function(e){if(e.key==='Enter')goStep2()});}
     document.getElementById('w-next').onclick=goStep2;
@@ -381,10 +454,14 @@ function renderWelcome(){
     document.querySelectorAll('.av-pick').forEach(function(b){b.onclick=function(){wAv=+b.dataset.i;renderWelcome();};});
     document.querySelectorAll('.col-pick').forEach(function(b){b.onclick=function(){wCol=+b.dataset.i;renderWelcome();};});
     document.getElementById('w-done').onclick=finishWelcome;
+    // Pressing Enter on the avatar screen starts the game too
+    document.onkeydown=function(e){if(e.key==='Enter'){e.preventDefault();finishWelcome();}};
   }
 }
 function goStep2(){if(!wName.trim()||wName.trim().length<2){notify('Name must be at least 2 characters','error');return;}wStep=1;renderWelcome();}
 function finishWelcome(){
+  document.onkeydown=null; // stop the avatar-screen Enter handler from firing elsewhere
+  if(!wName.trim()||wName.trim().length<2){notify('Name must be at least 2 characters','error');wStep=0;renderWelcome();return;}
   // Use the Firebase-issued UID so identity is server-verified, not just a local random string
   var p={id:_firebaseUid||uid(),name:clean(wName.trim()),avatar:AVATARS[wAv],color:COLORS[wCol]};
   try{sessionStorage.setItem('stb_p',JSON.stringify(p));}catch(e){}
@@ -460,6 +537,7 @@ function renderLobby(){
       unbind();setState({roomId:null,room:null,screen:'home'});return;
     }
     S.room=r2;
+    maybeReconcile(r2); // drop players who disconnected; hand off host if needed
     if(r2.status==='playing'){handleGameStart(r2);return;}
     var newSig=(r2.players||[]).map(function(x){return x.id;}).sort().join(',')+'|'+r2.hostId;
     if(newSig!==prevSig){prevSig=newSig;renderLobby();return;}
@@ -565,6 +643,7 @@ function startGameTimer(){
   unbind();
   addBC(function(r2){
     if(!r2)r2=getRoom(S.roomId);if(!r2)return;S.room=r2;
+    maybeReconcile(r2); // hand off host if the host disconnected mid-game
     if(r2.lastNotice&&r2.lastNotice.ts&&r2.lastNotice.ts!==_seenNoticeTs){_seenNoticeTs=r2.lastNotice.ts;notify(r2.lastNotice.t,'warn');}
     if(r2.gameEnded){unbind();stopTimer();setState({screen:'final',finalScores:r2.scores||{}});return;}
     if(r2.currentLetter&&r2.currentLetter!==S.letter&&!r2.roundStopped&&!gEnded){stopTimer();gAnswers={};gEnded=false;gStopAnim=false;setState({room:r2,letter:r2.currentLetter,screen:'roundstart'});return;}
@@ -892,10 +971,11 @@ function renderFinal(){
 // ── SHARED ACTIONS
 function createRoom(isPrivate){
   var id=rcode(),p=S.player;
-  var r={id:id,isPrivate:isPrivate,hostId:p.id,status:'lobby',players:[{id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0}],settings:{rounds:3,timerSec:90,categories:BUNDLES.classic.cats},chat:[{sys:true,t:'Room '+id+' created — share the code!'}],currentRound:0,totalRounds:3,scores:{},submittedAnswers:{},submittedPlayers:[],skipReqs:{},skippedCats:[]};
+  var r={id:id,isPrivate:isPrivate,hostId:p.id,status:'lobby',players:[{id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0}],settings:{rounds:3,timerSec:90,categories:BUNDLES.classic.cats},chat:[{sys:true,t:'Room '+id+' created — share the code!'}],currentRound:0,totalRounds:3,scores:{},submittedAnswers:{},submittedPlayers:[],skipReqs:{},skippedCats:[],online:{}};
+  r.online[p.id]=Date.now();
   saveRoom(id,r);showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;lobbyCustom='';
   try{sessionStorage.setItem('stb_room',id);}catch(e){}
-  setState({roomId:id,room:r,screen:'lobby'});
+  setState({roomId:id,room:r,screen:'lobby'});setupPresence();
 }
 function joinPublic(){
   if(!_db){notify('Not connected yet — try again','error');return;}
@@ -908,6 +988,7 @@ function joinPublic(){
       var pls=r.players?(Array.isArray(r.players)?r.players:Object.values(r.players)):[];
       if(pls.length>=8)return false;
       if(pls.find(function(x){return x&&x.id===myId;}))return false; // skip rooms we're already in
+      if(!r.online||Object.keys(r.online).length===0)return false;   // skip dead lobbies (nobody connected)
       return true;
     });
     if(!avail.length){notify('No available games right now','warn');return;}
@@ -938,6 +1019,7 @@ function doJoin(){
         rr.players.push({id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0});
         rr.chat=(rr.chat||[]).slice(-100).concat([{sys:true,t:p.name+' joined the lobby'}]);
       }
+      rr.online=rr.online||{};rr.online[p.id]=Date.now(); // mark online atomically with joining
       return rr;
     },function(err,committed,val){
       if(err||!val){notify('Could not reach Firebase – check your internet','error');return;}
@@ -945,7 +1027,7 @@ function doJoin(){
       if(!(val.players||[]).find(function(x){return x.id===p.id;})){notify('Room is full!','error');return;}
       showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;
       try{sessionStorage.setItem('stb_room',c);}catch(e){}
-      homeMode='';joinCode='';setState({roomId:c,room:val,screen:'lobby'});
+      homeMode='';joinCode='';setState({roomId:c,room:val,screen:'lobby'});setupPresence();
     });
   }).catch(function(e){
     if(e&&e.message==='permission'){notify('Database rules error – check Firebase console','error');}
@@ -953,11 +1035,12 @@ function doJoin(){
   });
 }
 function leaveRoom(){
-  unbind();stopTimer();
+  unbind();stopTimer();clearPresence();
   var id=S.roomId,p=S.player;
   if(id){
     txRoom(id,function(r){
       r.players=(r.players||[]).filter(function(x){return x.id!==p.id;});
+      if(r.online)delete r.online[p.id];
       r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:p.name+' left'}]);
       if(r.hostId===p.id&&r.players.length>0){r.hostId=r.players[0].id;r.chat.push({sys:true,t:r.players[0].name+' is now host'});}
       return r;
@@ -1130,6 +1213,7 @@ function render(){
               else if(r.status==='playing'){gAnswers={};gEnded=false;S.letter=r.currentLetter||LETTERS[0];S.screen='game';}
               else{S.screen='home';}
             } else {S.screen='home';}
+            if(S.roomId)setupPresence(); // re-announce presence after a reload
             render();
             if(S.screen==='game')startGameTimer();
           }).catch(function(){S.screen='home';render();});
