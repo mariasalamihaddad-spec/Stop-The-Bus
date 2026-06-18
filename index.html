@@ -233,7 +233,11 @@ function initFirebase() {
 function getRoom(id) { return _roomCache[id] || null; }
 function saveRoom(id, r) {
   _roomCache[id] = r;
-  if (_db) _db.ref('rooms/' + id).set(r).catch(function(e){ console.error('saveRoom', e); });
+  if (_db) _db.ref('rooms/' + id).set(r).catch(function(e){
+    console.error('saveRoom', e);
+    var code=((e&&(e.code||e.message))||'').toString().toLowerCase();
+    if(code.indexOf('permission')>=0) notify('Room could not be saved — database rules are blocking writes. Fix the rules in the Firebase console.','error');
+  });
 }
 function delRoom(id) {
   delete _roomCache[id];
@@ -1036,7 +1040,7 @@ function doJoin(){
       rr.online=rr.online||{};rr.online[p.id]=Date.now(); // mark online atomically with joining
       return rr;
     },function(err,committed,val){
-      if(err||!val){notify('Could not reach Firebase – check your internet','error');return;}
+      if(err||!val){var ec=((err&&(err.code||err.message))||'').toString().toLowerCase();notify(ec.indexOf('permission')>=0?'Database rules are blocking access — fix the rules in the Firebase console':'Could not reach Firebase – check your internet','error');return;}
       if(val.status!=='lobby'){notify('Game already started!','warn');return;}
       if(!(val.players||[]).find(function(x){return x.id===p.id;})){notify('Room is full!','error');return;}
       showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;
@@ -1044,7 +1048,8 @@ function doJoin(){
       homeMode='';joinCode='';setState({roomId:c,room:val,screen:'lobby'});setupPresence();
     });
   }).catch(function(e){
-    if(e&&e.message==='permission'){notify('Database rules error – check Firebase console','error');}
+    var code=((e&&(e.code||e.message))||'').toString().toLowerCase();
+    if(code.indexOf('permission')>=0){notify('Database rules are blocking access — fix the rules in the Firebase console','error');}
     else{notify('Could not reach Firebase – check your internet','error');}
   });
 }
