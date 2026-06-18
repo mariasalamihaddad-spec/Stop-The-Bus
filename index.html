@@ -184,6 +184,19 @@ const BAD=['fuck','shit','bitch','crap','dick','pussy','bastard','slut','cunt'];
 function clean(t){let o=t;BAD.forEach(w=>{o=o.replace(new RegExp(w,'gi'),'***')});return o;}
 function uid(){return Math.random().toString(36).slice(2,12)}
 function rcode(){return Math.random().toString(36).slice(2,8).toUpperCase()}
+// Pick the round letter INSIDE a Firebase transaction so it's chosen exactly
+// once and every client reads the same committed value. Pool-aware: never
+// repeats a letter already used this game until the whole alphabet is exhausted.
+function pickLetterMutate(r){
+  if(r.currentLetter)return r;            // already chosen for this round — never repick
+  var used=Array.isArray(r.usedLetters)?r.usedLetters:[];
+  var avail=LETTERS.filter(function(L){return used.indexOf(L)<0;});
+  if(!avail.length){avail=LETTERS.slice();used=[];} // whole alphabet used — start a fresh pool
+  var L=avail[Math.floor(Math.random()*avail.length)];
+  r.currentLetter=L;
+  r.usedLetters=used.concat([L]);
+  return r;
+}
 
 // ── FIREBASE CONFIG
 const FIREBASE_CONFIG = {
@@ -497,10 +510,11 @@ function finishWelcome(){
   var p={id:_firebaseUid||uid(),name:clean(wName.trim()),avatar:AVATARS[wAv],color:COLORS[wCol]};
   try{sessionStorage.setItem('stb_p',JSON.stringify(p));}catch(e){}
   S.player=p;S.screen='home';homeMode='';render();
+  if(pendingRoom){var pr=pendingRoom;pendingRoom='';joinCode=pr;doJoin();} // came in via a shared ?room= link
 }
 
 // ── HOME
-var homeMode='',joinCode='';
+var homeMode='',joinCode='',pendingRoom=''; // pendingRoom: a ?room=CODE link opened before a profile exists
 function renderHome(){
   var p=S.player;
   var main=homeMode===''?'<button class="btn btn-primary btn-big btn-full" id="h-public">🌐 Create Public Room</button><button class="btn btn-secondary btn-big btn-full" id="h-private" style="margin-top:10px">🔒 Create Private Room</button><button class="btn btn-teal btn-big btn-full" id="h-join-public" style="margin-top:10px">🎲 Join Public Game</button><button class="btn btn-teal btn-big btn-full" id="h-join-mode" style="margin-top:10px">🔑 Join with Code</button>':'<div class="card col gap3"><h2 style="font-weight:800;font-size:22px">Enter Room Code</h2><input class="inp" id="jcode" placeholder="XXXXXX" maxlength="6" value="'+joinCode+'" style="font-size:30px;text-align:center;letter-spacing:8px;font-weight:900;padding:16px"><div class="row gap2"><button class="btn btn-secondary" id="h-back">← Back</button><button class="btn btn-primary btn-full" id="h-do-join">Join →</button></div></div>';
@@ -539,11 +553,13 @@ function renderLobby(){
     settingsHTML='<div class="card-sm col gap3"><div class="row center between"><h3 style="font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Settings</h3><button class="btn btn-secondary btn-sm" id="toggle-settings">'+(showSettings?'▲ Hide':'▼ Show')+'</button></div>'+innerSettings+'</div>';
   }
   var startHTML=isHost?'<button class="btn btn-primary btn-big btn-full" id="lb-start" '+(r.players.length<1?'disabled':'')+'>🚌 Start Game!</button>':'<div class="tc" style="color:var(--text2);padding:16px">⌛ Waiting for host to start...</div>';
-  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center between"><div><h1 style="font-size:24px;font-weight:900;color:var(--accent)">'+(r.isPrivate?'🔒':'🌐')+' '+(r.isPrivate?'Private':'Public')+' Room</h1><p style="color:var(--text2);font-size:13px">'+r.players.length+' player'+(r.players.length!==1?'s':'')+' in lobby</p></div><button class="btn btn-secondary btn-sm" id="lb-leave">Leave</button></div><div class="card-sm tc"><p style="color:var(--text2);font-size:12px;margin-bottom:8px">Room Code — tap to copy</p><div class="rcode" id="copy-code">'+r.id+'</div></div><div class="card-sm col gap2"><h3 style="font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Players ('+r.players.length+'/8)</h3>'+plHTML+waitingHTML+'</div>'+settingsHTML+'<div class="chat-box"><div class="chat-msgs" id="lobby-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="chat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="chat-send">↑</button></div></div>'+startHTML+'</div></div>';
+  document.getElementById('app').innerHTML='<div class="screen screen-top"><div class="maxw-lg fa col gap3" style="width:100%"><div class="row center between"><div><h1 style="font-size:24px;font-weight:900;color:var(--accent)">'+(r.isPrivate?'🔒':'🌐')+' '+(r.isPrivate?'Private':'Public')+' Room</h1><p style="color:var(--text2);font-size:13px">'+r.players.length+' player'+(r.players.length!==1?'s':'')+' in lobby</p></div><button class="btn btn-secondary btn-sm" id="lb-leave">Leave</button></div><div class="card-sm tc"><p style="color:var(--text2);font-size:12px;margin-bottom:8px">Room Code — tap to copy</p><div class="rcode" id="copy-code">'+r.id+'</div><button class="btn btn-secondary btn-sm" id="share-link" style="margin-top:10px">🔗 Copy invite link</button></div><div class="card-sm col gap2"><h3 style="font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Players ('+r.players.length+'/8)</h3>'+plHTML+waitingHTML+'</div>'+settingsHTML+'<div class="chat-box"><div class="chat-msgs" id="lobby-chat">'+chatH(r.chat||[])+'</div><div class="chat-footer"><input class="inp" id="chat-inp" placeholder="Chat..." style="flex:1;padding:8px 12px;font-size:13px" maxlength="120"><button class="btn btn-secondary btn-sm" id="chat-send">↑</button></div></div>'+startHTML+'</div></div>';
 
   document.getElementById('lb-leave').onclick=leaveRoom;
   var copy=document.getElementById('copy-code');
   if(copy)copy.onclick=function(){try{navigator.clipboard.writeText(S.roomId).catch(function(){});}catch(e){}notify('Copied!','success');};
+  var shareBtn=document.getElementById('share-link');
+  if(shareBtn)shareBtn.onclick=function(){var url=location.origin+location.pathname+'?room='+S.roomId;try{navigator.clipboard.writeText(url).catch(function(){});}catch(e){}notify('Invite link copied!','success');};
   var ts=document.getElementById('toggle-settings');if(ts)ts.onclick=function(){showSettings=!showSettings;renderLobby();};
   var rr=document.getElementById('rr');if(rr)rr.oninput=function(){lobbyRounds=+rr.value;var el=document.getElementById('rv');if(el)el.textContent=lobbyRounds;};
   var tr=document.getElementById('tr');if(tr)tr.oninput=function(){lobbyTimer=+tr.value;var el=document.getElementById('tv');if(el)el.textContent=lobbyTimer+'s';};
@@ -624,7 +640,7 @@ function bindGame(){
   document.querySelectorAll('.game-inp').forEach(function(inp){
     inp.addEventListener('input',function(){
       var cat=inp.dataset.cat,v=inp.value;
-      if(v.length>0&&v[0].toUpperCase()!==S.letter){notify('Must start with '+S.letter+'!','error');inp.value=gAnswers[cat]||'';return;}
+      if(S.letter&&v.length>0&&v[0].toUpperCase()!==S.letter){notify('Must start with '+S.letter+'!','error');inp.value=gAnswers[cat]||'';return;}
       gAnswers[cat]=v;
       var done=v.trim().length>=3;
       var row=inp.closest('.grow');if(row)row.classList.toggle('done',done);
@@ -660,7 +676,7 @@ function startGameTimer(){
         if(!r.submittedPlayers)r.submittedPlayers=[];
         if(r.submittedPlayers.indexOf(playerId)<0)r.submittedPlayers.push(playerId);
         if(!r.roundStopped){
-          r.roundStopped=true;r.stoppedBy='Timer';
+          r.roundStopped=true;r.stoppedBy='Timer';r.stoppedById=null; // timer ran out — no STOP bonus
           r.chat=(r.chat||[]).slice(-99).concat([{sys:true,t:'⏰ Time\'s up! Answers saved.'}]);
         }
         return r;
@@ -733,6 +749,7 @@ function doStop(){
       if(r.submittedPlayers.indexOf(playerId)<0)r.submittedPlayers.push(playerId);
       r.roundStopped=true;
       r.stoppedBy=playerName;
+      r.stoppedById=playerId; // remember who stopped, for the race bonus at tally time
       r.chat=(r.chat||[]).slice(-99).concat([{sys:true,t:'🚌 '+playerName+' stopped the bus!'}]);
       return r;
     }, function(err, committed, snap){
@@ -960,6 +977,25 @@ function finalizeVotes(){
         add[pl.id]+=players.length===1?10:(dupMap[cat][pl.id]==='dup'?5:10);
       }
     });});
+    // STOP-the-bus race bonus: the player who stopped the bus gets +5 if EVERY
+    // one of their active-category answers is valid (non-empty and not scored 0
+    // / rejected). Timer-ended rounds have no stoppedById, so no bonus.
+    var BONUS=5;
+    var stopperId=r.stoppedById;
+    if(stopperId&&players.find(function(pl){return pl.id===stopperId;})&&cats.length){
+      var allValid=cats.every(function(cat){
+        var ans=(matrix[cat][stopperId]||'').trim();
+        if(!ans)return false;
+        var key=cat+'||'+stopperId;
+        if(mode==='host'){var pts=(typeof votes[key]==='number')?votes[key]:(dupMap[cat][stopperId]==='dup'?5:10);return pts>0;}
+        return votes[key]!=='reject';
+      });
+      if(allValid){
+        add[stopperId]=(add[stopperId]||0)+BONUS;
+        var sName=(players.find(function(pl){return pl.id===stopperId;})||{}).name||'Player';
+        r.chat=(r.chat||[]).slice(-99).concat([{sys:true,t:'🏁 '+sName+' earned a +'+BONUS+' STOP bonus — all answers valid!'}]);
+      }
+    }
     if(!r.scores)r.scores={};
     players.forEach(function(pl){r.scores[pl.id]=(r.scores[pl.id]||0)+add[pl.id];r.players.forEach(function(rpl){if(rpl.id===pl.id)rpl.score=r.scores[pl.id];});});
     r.lastRoundDelta=add;
@@ -1002,7 +1038,7 @@ function renderFinal(){
 // ── SHARED ACTIONS
 function createRoom(isPrivate){
   var id=rcode(),p=S.player;
-  var r={id:id,isPrivate:isPrivate,hostId:p.id,status:'lobby',players:[{id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0}],settings:{rounds:3,timerSec:90,categories:BUNDLES.classic.cats},chat:[{sys:true,t:'Room '+id+' created — share the code!'}],currentRound:0,totalRounds:3,scores:{},submittedAnswers:{},submittedPlayers:[],skipReqs:{},skippedCats:[],online:{}};
+  var r={id:id,isPrivate:isPrivate,hostId:p.id,status:'lobby',players:[{id:p.id,name:p.name,avatar:p.avatar,color:p.color,score:0}],settings:{rounds:3,timerSec:90,categories:BUNDLES.classic.cats},chat:[{sys:true,t:'Room '+id+' created — share the code!'}],currentRound:0,totalRounds:3,scores:{},submittedAnswers:{},submittedPlayers:[],skipReqs:{},skippedCats:[],online:{},usedLetters:[],currentLetter:null};
   r.online[p.id]=Date.now();
   saveRoom(id,r);showSettings=false;lobbyBundle='classic';lobbyRounds=3;lobbyTimer=90;lobbyCustom='';
   try{sessionStorage.setItem('stb_room',id);}catch(e){}
@@ -1101,6 +1137,7 @@ function hostStart(){
   txRoom(S.roomId,function(r){
     r.settings={rounds:lobbyRounds,timerSec:lobbyTimer,categories:cats,validation:lobbyValidation};
     r.currentRound=0;r.totalRounds=lobbyRounds;r.scores={};r.status='playing';r.submittedAnswers={};r.submittedPlayers=[];r.skipReqs={};r.skippedCats=[];
+    r.usedLetters=[];r.currentLetter=null;r.stoppedById=null; // fresh letter pool for the new game
     r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'🚌 Game starting!'}]);
     return r;
   },function(err,committed,val){
@@ -1114,9 +1151,11 @@ function handleGameStart(r){
     gAnswers={};gEnded=false;gStopAnim=false;vVotes={};vPhase='vote';
     setState({room:live,letter:live.currentLetter,screen:'roundstart'});
   } else if(live.hostId===S.player.id){
-    // Only the host picks the letter — write just that field atomically
-    var L=LETTERS[Math.floor(Math.random()*LETTERS.length)];
-    txRoom(S.roomId,function(r){r.currentLetter=L;return r;},function(err,committed,val){
+    // Host drives the pick, but it's chosen inside the transaction (guarded +
+    // pool-aware) so it's set exactly once. Display the COMMITTED value, never a
+    // local random — that's what guarantees every player sees the same letter.
+    txRoom(S.roomId,pickLetterMutate,function(err,committed,val){
+      var L=(val&&val.currentLetter)||S.letter;
       gAnswers={};gEnded=false;gStopAnim=false;vVotes={};vPhase='vote';
       setState({room:val||live,letter:L,screen:'roundstart'});
     });
@@ -1202,7 +1241,7 @@ function hostEndGame(){
 
 function playAgain(){
   txRoom(S.roomId,function(r){
-    r.status='lobby';r.currentRound=0;r.scores={};r.submittedAnswers={};r.submittedPlayers=[];r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.gameEnded=false;r.skipReqs={};r.skippedCats=[];
+    r.status='lobby';r.currentRound=0;r.scores={};r.submittedAnswers={};r.submittedPlayers=[];r.currentLetter=null;r.roundStopped=false;r.stoppedBy=null;r.stoppedById=null;r.gameEnded=false;r.skipReqs={};r.skippedCats=[];r.usedLetters=[];
     r.players=(r.players||[]).map(function(pl){pl.score=0;return pl;});
     r.chat=(r.chat||[]).slice(-100).concat([{sys:true,t:'New game! Back to lobby.'}]);
     return r;
@@ -1227,6 +1266,7 @@ function render(){
 (function(){
   document.getElementById('app').innerHTML='<div class="screen tc"><p style="color:var(--text2);font-size:18px">Loading…</p></div>';
   initFirebase().then(function(){
+    var urlRoom='';try{urlRoom=(new URLSearchParams(location.search).get('room')||'').trim().toUpperCase();}catch(e){}
     try{
       var sp=sessionStorage.getItem('stb_p');
       var sr=sessionStorage.getItem('stb_room');
@@ -1237,12 +1277,14 @@ function render(){
           S.player.id=_firebaseUid;
           try{sessionStorage.setItem('stb_p',JSON.stringify(S.player));}catch(e){}
         }
+        // A shared ?room= link takes priority — drop straight into that room
+        if(urlRoom){S.screen='home';homeMode='';render();joinCode=urlRoom;doJoin();return;}
         if(sr){
           loadRoom(sr).then(function(r){
             if(r&&r.players.find(function(x){return x.id===S.player.id;})){
               S.roomId=sr;S.room=r;
               if(r.status==='lobby'){S.screen='lobby';}
-              else if(r.status==='playing'){gAnswers={};gEnded=false;S.letter=r.currentLetter||LETTERS[0];S.screen='game';}
+              else if(r.status==='playing'){gAnswers={};gEnded=false;S.letter=r.currentLetter||'';S.screen='game';} // no LETTERS[0] fallback — the game listener syncs the real letter
               else{S.screen='home';}
             } else {S.screen='home';}
             if(S.roomId)setupPresence(); // re-announce presence after a reload
@@ -1251,6 +1293,9 @@ function render(){
           }).catch(function(){S.screen='home';render();});
           return;
         } else {S.screen='home';}
+      } else if(urlRoom){
+        // No profile yet — remember the room and auto-join after the welcome flow
+        pendingRoom=urlRoom;
       }
     }catch(e){S.screen='welcome';}
     render();
