@@ -245,7 +245,11 @@ function delRoom(id) {
 }
 function loadRoom(id) {
   if (!_db) return Promise.reject(new Error('Firebase not ready'));
-  return _db.ref('rooms/' + id).get().then(function(snap) {
+  // Use once('value') rather than get(): once() waits for the realtime
+  // connection to establish and then resolves, whereas get() can reject early
+  // (e.g. "client is offline") if the WebSocket isn't up yet — common on a
+  // freshly loaded joiner over a higher-latency link (UAE -> Singapore DB).
+  return _db.ref('rooms/' + id).once('value').then(function(snap) {
     var val = snap.val();
     if (val) _roomCache[id] = val;
     return val;
@@ -263,26 +267,35 @@ function txRoom(id, mutate, cb){
     return;
   }
   var ref=_db.ref('rooms/'+id);
-  function runTx(){
+  function runTx(detach){
     ref.transaction(function(cur){
       if(cur===null)return; // room genuinely gone — abort, never recreate
       var res=mutate(cur);
       return res===undefined?cur:res;
     }, function(err,committed,snap){
+      if(detach)detach();
       var val=snap?snap.val():null;
       if(val)_roomCache[id]=val;
       if(cb)cb(err,committed,val);
     }, false);
   }
   // If the persistent realtime listener is already attached to this room, the
-  // local cache is warm, so we can run the transaction immediately (one round
-  // trip). Otherwise prime with a single read first — without it a freshly
-  // opened room (e.g. someone joining) runs against an empty cache, sees null
-  // and aborts, which used to look like a "Firebase connection" error.
+  // local cache is warm AND held, so we can run the transaction immediately.
   if(_roomRef && _roomRefId===id){
     runTx();
   } else {
-    ref.once('value').then(runTx).catch(function(err){ if(cb)cb(err,false,null); });
+    // No listener yet (e.g. someone joining). Firebase only keeps a node cached
+    // while a listener is attached, so a bare once('value') can be evicted
+    // before transaction() reads it — the update fn then sees null and aborts
+    // (the null-guard above), which surfaced as a bogus "Could not reach
+    // Firebase" when joining, especially on a higher-latency link where the
+    // eviction race is almost always lost. Attach a REAL listener, wait for its
+    // first value (cache now warm and HELD), run the tx, then detach it.
+    var started=false;
+    var warm=function(){ if(started)return; started=true; runTx(function(){ ref.off('value',warm); }); };
+    ref.on('value',warm,function(err){ if(started)return; started=true; ref.off('value',warm); if(cb)cb(err,false,null); });
+    // Never hang forever if the first value event simply never arrives.
+    setTimeout(function(){ if(started)return; started=true; ref.off('value',warm); if(cb)cb(new Error('timeout'),false,null); }, 8000);
   }
 }
 // Build this player's cleaned answer map (only 3+ char answers count for points)
