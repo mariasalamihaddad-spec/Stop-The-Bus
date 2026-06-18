@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Stop the Bus!</title>
+<!-- Build: complete & fixed — stop-the-bus + answer table, skip-category requests,
+     10/5/0 host scoring, join public game, leave anywhere, presence/ghost cleanup
+     (9s grace), Firebase perf (preconnect + parallel SDK + single round-trip writes).
+     Canonical project location: C:\Projects\Bus Stop  (do NOT use the old OneDrive copy) -->
 <!-- Warm up + parallel-fetch Firebase so it's ready the instant the app needs it -->
 <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
 <link rel="dns-prefetch" href="https://www.gstatic.com">
@@ -338,30 +342,40 @@ function clearPresence(){
   _presenceRoom=null;
 }
 // Remove vanished players (and hand off host) — runs as a transaction so it's
-// safe even if several clients try at once. Only the lowest online uid acts, to
-// avoid every client writing at the same time.
+// safe even if several clients try at once. A player is only pruned after being
+// missing from presence for GRACE ms, so someone who just joined or is mid-
+// refresh is NEVER kicked. Only the lowest online uid acts, to avoid every
+// client writing at the same time.
+var _ghostSeen={},GHOST_GRACE=9000;
 function maybeReconcile(r){
   if(!r||!r.players||!S.player)return;
-  var online=r.online||{};
+  var online=r.online||{},now=Date.now();
+  // Track how long each player has been missing from presence
+  r.players.forEach(function(p){
+    if(online[p.id]===undefined){ if(!_ghostSeen[p.id])_ghostSeen[p.id]=now; }
+    else { delete _ghostSeen[p.id]; }
+  });
+  function confirmedGone(id){ return online[id]===undefined && _ghostSeen[id] && (now-_ghostSeen[id])>GHOST_GRACE; }
   var onlineIds=r.players.filter(function(p){return online[p.id]!==undefined;}).map(function(p){return p.id;}).sort();
-  if(!onlineIds.length)return;              // nobody confirmed online — don't touch (presence may be warming up)
+  if(!onlineIds.length)return;              // nobody confirmed online yet — presence still warming up
   if(onlineIds[0]!==S.player.id)return;     // someone else is the designated cleaner
-  var ghosts=r.players.filter(function(p){return online[p.id]===undefined;});
-  var hostOffline=!r.players.find(function(p){return p.id===r.hostId&&online[p.id]!==undefined;});
-  // Only prune player rows while in the lobby (never kick someone mid-round); always fix an absent host.
-  var needPrune=(r.status==='lobby')&&ghosts.length>0;
-  if(!needPrune&&!hostOffline)return;
+  var lobbyGhosts=(r.status==='lobby')?r.players.filter(function(p){return confirmedGone(p.id);}):[];
+  var hostGone=confirmedGone(r.hostId);
+  if(!lobbyGhosts.length&&!hostGone)return;
   txRoom(S.roomId,function(rr){
     var on=rr.online||{};
-    var alive=(rr.players||[]).filter(function(p){return on[p.id]!==undefined;});
-    if(alive.length===0)return;             // safety: never wipe everyone on a presence glitch
+    if((rr.players||[]).filter(function(p){return on[p.id]!==undefined;}).length===0)return; // never wipe everyone
     var changed=false;
-    if(rr.status==='lobby'&&alive.length!==(rr.players||[]).length){
-      var gone=(rr.players||[]).filter(function(p){return on[p.id]===undefined;});
-      rr.players=alive;changed=true;
-      gone.forEach(function(g){rr.chat=(rr.chat||[]).slice(-100).concat([{sys:true,t:(g.name||'A player')+' left (disconnected)'}]);});
+    if(rr.status==='lobby'){
+      var gone=(rr.players||[]).filter(function(p){return confirmedGone(p.id);});
+      if(gone.length){
+        var goneIds=gone.map(function(g){return g.id;});
+        rr.players=(rr.players||[]).filter(function(p){return goneIds.indexOf(p.id)<0;});
+        gone.forEach(function(g){rr.chat=(rr.chat||[]).slice(-100).concat([{sys:true,t:(g.name||'A player')+' left (disconnected)'}]);});
+        changed=true;
+      }
     }
-    if(!rr.players.find(function(p){return p.id===rr.hostId;})){rr.hostId=rr.players[0].id;changed=true;}
+    if((rr.players||[]).length&&!rr.players.find(function(p){return p.id===rr.hostId;})){rr.hostId=rr.players[0].id;changed=true;}
     return changed?rr:undefined;
   });
 }
